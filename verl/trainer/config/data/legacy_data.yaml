@@ -107,3 +107,6 @@ datagen:
   # The class name of the data generation class within the specified file.
   # E.g. 'MockDataGenerator'
   name: null
+# Sglang does not support video data.
+# If you want to use video data, set this to True for sglang that manually set video data to image key.
+sglang_video: False
