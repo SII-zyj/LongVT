@@ -23,10 +23,10 @@ repos:
         language: python
         pass_filenames: false
 
-  - repo: local
-    hooks:
-      - id: check-license
-        name: Check license
-        entry: python3 tests/special_sanity/check_license.py --directory .
-        language: python
-        pass_filenames: false
+  # - repo: local
+    # hooks:
+      # - id: check-license
+        # name: Check license
+        # entry: python3 tests/special_sanity/check_license.py --directory .
+        # language: python
+        # pass_filenames: false

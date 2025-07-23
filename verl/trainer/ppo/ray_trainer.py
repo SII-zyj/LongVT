@@ -1208,7 +1208,7 @@ class RayPPOTrainer:
 
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
-
+                    # breakpoint()
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
                         if self.use_rm:
@@ -1341,6 +1341,41 @@ class RayPPOTrainer:
                                 reward_extra_infos_dict=reward_extra_infos_dict,
                                 dump_path=rollout_data_dir,
                             )
+
+                    # tool metrics
+                    # 需要一个简单的方法判断使用的tool种类
+                    messages_list = gen_batch_output.non_tensor_batch["messages"]
+
+                    tool_call_counts = []
+                    for item in messages_list:
+                        msgs = item["messages"]  # List[Message]
+
+                        if (
+                            msgs[0].role == "user"
+                            and "<tool_call>" in msgs[0].content[1]["text"]
+                            and "</tool_call>" in msgs[0].content[1]["text"]
+                        ):
+                            pass
+                        else:
+                            continue
+
+                        total_calls = sum(len(m.tool_calls or []) for m in msgs)
+                        tool_call_counts.append(total_calls if total_calls < 5 else 5)  # max_tool_call
+
+                    if tool_call_counts:
+                        mean_calls = sum(tool_call_counts) / len(tool_call_counts)
+                        min_calls = min(tool_call_counts)
+                        max_calls = max(tool_call_counts)
+                    else:
+                        mean_calls = min_calls = max_calls = 0
+
+                    metrics.update(
+                        {
+                            "tool_calls/mean": mean_calls,
+                            "tool_calls/min": min_calls,
+                            "tool_calls/max": max_calls,
+                        }
+                    )
 
                     # validate
                     if (
