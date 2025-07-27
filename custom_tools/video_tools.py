@@ -19,6 +19,7 @@ import os
 from io import BytesIO
 
 from PIL import Image
+from typing import Optional
 
 from verl.tools.mcp_base_tool import MCPBaseTool
 
@@ -27,8 +28,23 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 class VideoTools(MCPBaseTool):
+    async def create(self, instance_id: Optional[str] = None, **kwargs) -> str:
+        """Create a tool instance.
+
+        Args:
+            instance_id: The instance id of the tool.
+
+        Returns:
+            The instance id of the tool.
+        """
+        if instance_id is None:
+            instance_id = str(uuid4())
+        self._instance_dict[instance_id] = {"tool_call_count": 0}
+        return instance_id
+
     async def execute(self, instance_id, parameters, **kwargs):
         try:
+            self._instance_dict[instance_id]["tool_call_count"] += 1 # tool call count
             result_text, metadata = await self._call_tool(instance_id, parameters)
             image_list = metadata["images"]
             from verl.utils.dataset.vision_utils import process_image
@@ -43,6 +59,10 @@ class VideoTools(MCPBaseTool):
             logger.error(f"[MCPBaseTool] Execution failed: {e}")
             return error_result, 0.0, {"error": str(e)}
 
+    # tool call count        
+    async def calc_reward(self, instance_id: str, **kwargs) -> str:
+        return self._instance_dict[instance_id]["tool_call_count"]
+
     def _parse_tool_result(self, content):
         image_contents = [part.data for part in filter(lambda x: x.type == "image", content)]
         # Convert base64 string to PIL image
@@ -52,3 +72,8 @@ class VideoTools(MCPBaseTool):
             image_lists.append(im)
 
         return "", {"images": image_lists, "api_request_error": ""}
+
+    async def release(self, instance_id: str, **kwargs) -> None:
+        self._instance_dict.pop(instance_id, None)
+     
+  

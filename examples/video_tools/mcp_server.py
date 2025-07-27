@@ -17,6 +17,8 @@ from io import BytesIO
 
 import numpy as np
 from decord import VideoReader, cpu
+from typing import Annotated
+from pydantic import Field
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ImageContent
 from PIL import Image
@@ -25,7 +27,11 @@ app = FastMCP("Video Tools MCP Server", "0.1.0")
 
 
 @app.tool(name="crop_video", description="Crop a video to a specified duration.")
-def crop_video(video_path: str, start_time: float, end_time: float) -> list[ImageContent]:
+def crop_video(
+    video_path: Annotated[str, Field(description="Path to the video file")],
+    start_time: Annotated[float, Field(description="Start time in seconds")],
+    end_time: Annotated[float, Field(description="End time in seconds, must be > start_time")]
+) -> list[ImageContent]:
     """
     Crop a video to a specified duration.
 
@@ -58,6 +64,40 @@ def crop_video(video_path: str, start_time: float, end_time: float) -> list[Imag
 
     return image_contents
 
+# video_zoom_in_tool
+# @app.tool(
+#     name="video_zoom_in_tool",
+#     description="Crops a region (bbox_2d) from a single frame specified by timestamp_sec in a video."
+# )
+# def video_zoom_in_tool(
+#     video_path: Annotated[str, Field(description="Path to the video file")],
+#     timestamp_sec: Annotated[float, Field(description="Timestamp in seconds")],
+#     bbox_2d: Annotated[list[float], Field(description="[x1, y1, x2, y2] in pixels")]
+# ) -> ImageContent:
+
+#     if len(bbox_2d) != 4:
+#         raise ValidationError("bbox_2d must be [x1, y1, x2, y2].")
+#     x1, y1, x2, y2 = map(int, bbox_2d)
+#     if x2 <= x1 or y2 <= y1:
+#         raise ValidationError("bbox_2d invalid: require x2>x1 and y2>y1.")
+
+#     path = Path(video_path)
+#     if not path.exists():
+#         raise FileNotFoundError(f"{path} not found") 
+
+#     vr  = VideoReader(str(path), ctx=cpu(0))          
+#     fps = vr.get_avg_fps()                           
+#     frame_idx = int(timestamp_sec * fps)
+
+#     frame_nd = vr.get_batch([frame_idx]).asnumpy()[0] 
+#     img = Image.fromarray(frame_nd).convert("RGB")   
+#     cropped = img.crop((x1, y1, x2, y2))
+
+#     buf = BytesIO()
+#     cropped.save(buf, format="PNG")
+#     b64 = base64.b64encode(buf.getvalue()).decode("utf-8")  
+
+#     return ImageContent(type="image", data=b64, mimeType="image/png")
 
 if __name__ == "__main__":
     app.run()

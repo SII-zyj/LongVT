@@ -78,19 +78,19 @@ def format_reward(predict_str: str) -> float:
     if re.fullmatch(think_answer_pattern, predict_str):
         return 1.0
 
-    # Check for \boxed{} format (common in mathematical solutions)
-    if extract_boxed_answer(predict_str):
-        return 1.0
+    # # Check for \boxed{} format (common in mathematical solutions)
+    # if extract_boxed_answer(predict_str):
+    #     return 1.0
 
-    # Check for basic answer format (contains some mathematical content and ends with a number)
-    if len(predict_str.strip()) > 50:  # Reasonable solution length
-        # Look for mathematical expressions or reasoning
-        has_math = bool(re.search(r"[=\+\-\*/\(\)\[\]\\]", predict_str))
-        # Look for final answer
-        has_answer = bool(extract_anwser_tag(predict_str))
+    # # Check for basic answer format (contains some mathematical content and ends with a number)
+    # if len(predict_str.strip()) > 50:  # Reasonable solution length
+    #     # Look for mathematical expressions or reasoning
+    #     has_math = bool(re.search(r"[=\+\-\*/\(\)\[\]\\]", predict_str))
+    #     # Look for final answer
+    #     has_answer = bool(extract_anwser_tag(predict_str))
 
-        if has_math and has_answer:
-            return 0.8  # Partial credit for reasonable format
+    #     if has_math and has_answer:
+    #         return 0.8  # Partial credit for reasonable format
 
     return 0.0
 
@@ -145,13 +145,13 @@ def compute_score(
         dict: A dictionary containing the computed score and other metrics.
     """
     score_dict = {}
-    if data_source in ["vstar", "vl_agent", "chart"]:
-        from . import vl_agent
+    if data_source in ["vstar", "vl_agent", "chart", "longvideo-reason"]:
+        from custom_rewards import vl_agent
 
         score = vl_agent.compute_score(solution_str, ground_truth, extra_info)
         score_dict["score"] = score
     elif data_source in ["thinklite_eureka", "xince"]:
-        from . import vl_agent
+        from custom_rewards import vl_agent
 
         score = vl_agent.compute_score_math(solution_str, ground_truth, extra_info)
         score_dict["score"] = score

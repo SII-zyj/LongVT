@@ -22,7 +22,7 @@ from openai import OpenAI
 
 openai_api_key = "EMPTY"
 openai_api_base_list = [
-    os.environ.get("LLM_AS_A_JUDGE_BASE", "YOUR_API_BASE_HERE"),
+    os.environ.get("LLM_AS_A_JUDGE_BASE", "https://sd1lm5gs3k341ncbl3acg.apigateway-cn-shanghai.volceapi.com/v1"),
 ]
 
 client_list = []
@@ -292,10 +292,10 @@ def compute_score(predict_str: str, ground_truth: str, extra_info=None) -> float
     # reward 1
     # return 0.8 * acc_reward + 0.2 * format_reward + 0.4 * tool_reward_base
     # reward 2
-    print(
-        f"[DEBUG] query={extra_info['question']}, {ground_truth=}, "
-        f"{answer_text=}, {acc_reward=}, {format_reward=}, {tool_reward=}"
-    )
+    # print(
+    #     f"[DEBUG] query={extra_info['question']}, {ground_truth=}, "
+    #     f"{answer_text=}, {acc_reward=}, {format_reward=}, {tool_reward=}"
+    # )
     return 0.8 * acc_reward + 0.2 * format_reward + 1.2 * tool_reward
 
     # reward 2

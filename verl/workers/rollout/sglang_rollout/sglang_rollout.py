@@ -512,7 +512,6 @@ class SGLangRollout(BaseRollout):
         """
         if config.multi_turn.tool_config_path is None:
             return [], {}, None, [], None
-
         tools_config_file = config.multi_turn.tool_config_path
         tool_list = initialize_tools_from_config(tools_config_file)
 
@@ -836,14 +835,13 @@ class SGLangRollout(BaseRollout):
         request_sampling_params.update(kwargs)
 
         while current_turns < self.config.multi_turn.max_assistant_turns:
-            # breakpoint()
             if _req.state == AsyncRolloutRequestStateEnum.PENDING:
                 await self._handle_pending_state(_req)
                 _req.state = AsyncRolloutRequestStateEnum.RUNNING
             elif _req.state == AsyncRolloutRequestStateEnum.TOOL_CALLING:
                 if _req.messages[-1].tool_calls is not None:
                     parsed_tool_calls = _req.messages[-1].tool_calls
-                    max_tools_per_turn = 5  # max tool call per turn
+                    max_tools_per_turn = 2  # max tool call per turn/config input?
                     if len(parsed_tool_calls) >= max_tools_per_turn:
                         parsed_tool_calls = parsed_tool_calls[:max_tools_per_turn]
                     tool_call_results = await asyncio.gather(
@@ -874,7 +872,6 @@ class SGLangRollout(BaseRollout):
 
                     # _req.state = AsyncRolloutRequestStateEnum.RUNNING
 
-                    # breakpoint()
                     success = _req.add_tool_response_messages(
                         self.processing_class,
                         [resp for resp, _, _ in tool_call_results],
@@ -1285,6 +1282,7 @@ class SGLangRollout(BaseRollout):
         ):
             if self._tool_schemas:
                 _tools_kwargs = prompts.non_tensor_batch["tools_kwargs"][data_idx]
+                _tools_kwargs = _tools_kwargs or {}  # fix mixed data bug
                 _tool_schemas = [self._tool_map[k].get_openai_tool_schema() for k in _tools_kwargs.keys()]
                 _input_ids = None
                 _attention_mask = None
