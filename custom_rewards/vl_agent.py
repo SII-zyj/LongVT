@@ -22,7 +22,7 @@ from openai import OpenAI
 
 openai_api_key = "EMPTY"
 openai_api_base_list = [
-    os.environ.get("LLM_AS_A_JUDGE_BASE", "https://sd1lm5gs3k341ncbl3acg.apigateway-cn-shanghai.volceapi.com/v1"),
+    os.environ.get("LLM_AS_A_JUDGE_BASE", "https://sd285v869b9467c7sab70.apigateway-cn-shanghai.volceapi.com/v1"),
 ]
 
 client_list = []
@@ -226,7 +226,7 @@ def compute_score(predict_str: str, ground_truth: str, extra_info=None) -> float
 
     count_vision_1 = predict_str.count("<tool_call>")
     count_vision_2 = predict_str.count("</tool_call>")
-    if count_vision_1 != count_vision_2 or count_vision_1 == 0:  ##
+    if count_vision_1 != count_vision_2:
         is_format_error = True
 
     predict_no_think = predict_str.split("</think>")[-1].strip()
@@ -235,51 +235,50 @@ def compute_score(predict_str: str, ground_truth: str, extra_info=None) -> float
     if count_answer_1 != count_answer_2 or count_answer_1 == 0:  ##
         is_format_error = True
 
-    answer_text = predict_str.split("<answer>")[-1].split("</answer>")[0].strip()
-
-    # pattern = re.compile(r'<\|im_start\|>assistant(.*?)$', re.DOTALL)  # 匹配最后一个 target 后的所有内容
-    # match = pattern.search(predict_str)
-    # if match:
-    #     answer_text = match.group(1).strip()
-    #     print(f'DEBUG{answer_text=}')
-    # else:
-    #     answer_text = ""
-
-    question_text = extra_info["question"]
-    full_prompt = get_prompt(answer_text, ground_truth, question_text)
-
-    client_idx = random.randint(0, len(client_list) - 1)
-    client = client_list[client_idx]
-    model_name = model_name_list[client_idx]
-
-    chat_response = client.chat.completions.create(
-        model=model_name,
-        messages=[
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": full_prompt},
-        ],
-        seed=random.randint(0, 1000000),
-        temperature=0.3,
-    )
-    response = chat_response.choices[0].message.content.strip()
-    # print(response)
-    if "Judgement:" in response:
-        response = response.split("Judgement:")[-1].strip()
-        if "1" in response:
-            acc_reward = 1.0
-        elif "0" in response:
-            acc_reward = 0.0
-        else:
-            print(f" [WARNING] resp format error {response=}")
-            acc_reward = 0.0
+    if count_answer_1 == 0 or count_answer_2 == 0:
+        answer_text = ""
     else:
-        if response == "1":
-            acc_reward = 1.0
-        elif response == "0":
-            acc_reward = 0.0
+        answer_text = predict_str.split("<answer>")[-1].split("</answer>")[0].strip()
+
+    # skip the case that the answer is empty
+    if answer_text == "":
+        acc_reward = 0.0
+    else:
+        question_text = extra_info["question"]
+        full_prompt = get_prompt(answer_text, ground_truth, question_text)
+
+        client_idx = random.randint(0, len(client_list) - 1)
+        client = client_list[client_idx]
+        model_name = model_name_list[client_idx]
+
+        chat_response = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": full_prompt},
+            ],
+            seed=random.randint(0, 1000000),
+            temperature=0.3,
+        )
+        response = chat_response.choices[0].message.content.strip()
+        # print(response)
+        if "Judgement:" in response:
+            response = response.split("Judgement:")[-1].strip()
+            if "1" in response:
+                acc_reward = 1.0
+            elif "0" in response:
+                acc_reward = 0.0
+            else:
+                print(f" [WARNING] resp format error {response=}")
+                acc_reward = 0.0
         else:
-            print(f" [WARNING] resp format error {response=}")
-            acc_reward = 0.0
+            if response == "1":
+                acc_reward = 1.0
+            elif response == "0":
+                acc_reward = 0.0
+            else:
+                print(f" [WARNING] resp format error {response=}")
+                acc_reward = 0.0
 
     # Penalize for model trying to predict longer answer to hack llm-as-judge
     if len(answer_text) >= 1000:
