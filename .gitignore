@@ -127,3 +127,4 @@ outputs
 
 workspace/*
 data/results/*
+data/scripts/*

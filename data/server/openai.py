@@ -1,3 +1,4 @@
+import os
 import time
 import uuid
 from typing import Optional
@@ -8,19 +9,18 @@ from .base_server import BaseServer, ChatCompletionRequest, ChatCompletionRespon
 from .mapping import register_server
 
 
-@register_server("openai", "OpenAIServer")
+@register_server("openai")
 class OpenAIServer(BaseServer):
-    def __init__(self, api_key: str, base_url: Optional[str] = None, organization: Optional[str] = None):
+    def __init__(self, api_key: str = None, base_url: Optional[str] = None):
         super().__init__()
-        self.api_key = api_key
-        self.base_url = base_url
-        self.organization = organization
+        self.api_key = api_key if api_key else os.getenv("OPENAI_API_KEY", "YOUR_API_KEY")
+        self.base_url = base_url if base_url else os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
         # Configure OpenAI client
-        self.client = openai.OpenAI(api_key=api_key, base_url=base_url, organization=organization)
+        self.client = openai.OpenAI(api_key=self.api_key, base_url=self.base_url)
 
         # Configure async OpenAI client
-        self.async_client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url, organization=organization)
+        self.async_client = openai.AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
 
     def chat_completion(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
         """Synchronous chat completion using OpenAI API"""
@@ -28,7 +28,7 @@ class OpenAIServer(BaseServer):
             # Convert request to OpenAI format
             openai_request = {
                 "model": request.model,
-                "messages": [message.to_dict() for message in request.messages],
+                "messages": request.messages,
                 **request.kwargs,
             }
 
@@ -71,7 +71,7 @@ class OpenAIServer(BaseServer):
             # Convert request to OpenAI format
             openai_request = {
                 "model": request.model,
-                "messages": [message.to_dict() for message in request.messages],
+                "messages": request.messages,
                 **request.kwargs,
             }
 
