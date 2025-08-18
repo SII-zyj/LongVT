@@ -25,19 +25,18 @@ def parse_args():
 def write_scenes(scenes, output_path):
     output_list = []
     for video_path, scene_list in scenes.items():
-        for scene_idx, scene in enumerate(scene_list):
+        for scene in scene_list:
             start_time, end_time = scene
             output_list.append(
                 {
                     "video_path": video_path,
                     "start_time": start_time.get_seconds(),
                     "end_time": end_time.get_seconds(),
-                    "scene_idx": scene_idx,
                 }
             )
 
-    # Sort by start time
-    output_list.sort(key=lambda x: x["start_time"])
+    # Sort by start time, given the video_path is the same, sort by start_time
+    output_list.sort(key=lambda x: (x["video_path"], x["start_time"]))
     with open(output_path, "w") as f:
         json.dump(output_list, f, indent=4)
 
@@ -67,7 +66,7 @@ def main():
 
     output_dict = {}
 
-    with ProcessPoolExecutor(max_workers=16) as executor:
+    with ProcessPoolExecutor(max_workers=32) as executor:
         futures = [executor.submit(get_video_length, input_file) for input_file in input_files]
         for idx, future in tqdm(enumerate(as_completed(futures)), total=len(futures), desc="Getting video lengths"):
             video_length = future.result()
@@ -77,11 +76,12 @@ def main():
     task_list = []
     for input_file, video_length in output_dict.items():
         time_chunks = split_video(video_length, args.num_parts)
+        time_chunks[-1] = (time_chunks[-1][0], time_chunks[-1][1] - 1)  # Remove the last 1s to avoid overflow
         for start_time, end_time in time_chunks:
             task_list.append((input_file, start_time, end_time))
 
     output_scenes = collections.defaultdict(list)
-    with ProcessPoolExecutor(max_workers=16) as executor:
+    with ProcessPoolExecutor(max_workers=32) as executor:
         futures = [
             executor.submit(detect_scenes, input_file, start_time, end_time)
             for input_file, start_time, end_time in task_list

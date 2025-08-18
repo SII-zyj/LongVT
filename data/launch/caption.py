@@ -83,16 +83,29 @@ def generate_caption_sync(task_list, server):
     return caption_dict
 
 
-async def run(task_lists, server):
-    tasks = [asyncio.create_task(generate_caption(task_list, server)) for task_list in task_lists]
-    pbar = tqdm(total=len(tasks), desc="Generating captions")
-    results = []
-    for task in tasks:
-        result = await task
-        results.append(result)
-        pbar.update(1)
-    pbar.close()
-    return results
+def run(video_path, start_time, end_time, fps, server_name):
+    server = SERVER_MAPPING[server_name]()
+    try:
+        messages = create_messages(video_path, start_time, end_time, fps)
+    except Exception as e:
+        print(f"Error creating messages for {video_path} at {start_time} - {end_time}: {e}")
+        return None
+
+    request = ChatCompletionRequest(
+        model="Qwen/Qwen2.5-VL-72B-Instruct",
+        messages=messages,
+        max_tokens=32768,
+        temperature=0.7,
+    )
+    response = server.chat_completion(request)
+    choices = response.choices[0]
+    caption_dict = {
+        "start_time": start_time,
+        "caption": choices["message"]["content"],
+        "end_time": end_time,
+        "video_path": video_path,
+    }
+    return caption_dict
 
 
 def main():
@@ -102,16 +115,14 @@ def main():
     with open(input_path) as f:
         input_data = json.load(f)
 
-    server = SERVER_MAPPING[args.server]()
-
-    task_lists = []
     if args.limit is not None:
         input_data = input_data[: args.limit]
 
     with ProcessPoolExecutor(max_workers=cpu_count() // 2) as executor:
         futures = []
+        results = []
         info_list = []
-        for item in tqdm(input_data, desc="Processing videos"):
+        for item in input_data:
             video_path = item["video_path"]
             start_time = item["start_time"]
             end_time = item["end_time"]
@@ -120,11 +131,12 @@ def main():
                 for i in range(0, int(end_time - start_time), 10):
                     futures.append(
                         executor.submit(
-                            create_messages,
+                            run,
                             video_path,
                             start_time=start_time + i,
                             end_time=start_time + i + 10,
                             fps=args.fps,
+                            server_name=args.server,
                         )
                     )
                     end_time = start_time + i + 10
@@ -132,21 +144,23 @@ def main():
             else:
                 futures.append(
                     executor.submit(
-                        create_messages, video_path, start_time=start_time, end_time=end_time, fps=args.fps
+                        run,
+                        video_path,
+                        start_time=start_time,
+                        end_time=end_time,
+                        fps=args.fps,
+                        server_name=args.server,
                     )
                 )
                 info_list.append((video_path, start_time, end_time))
 
-        pbar = tqdm(total=len(futures), desc="Preparing tasks")
-        for idx, future in enumerate(as_completed(futures)):
-            task_lists.append((future.result(), *info_list[idx]))
-            pbar.update(1)
-        pbar.close()
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Processing videos"):
+            if future.result() is not None:
+                results.append(future.result())
 
-    results = asyncio.run(run(task_lists, server))
-    # Debugging one request
-    # results = [generate_caption_sync(task_list, server) for task_list in task_lists[:1]]
-    # import pdb; pdb.set_trace()
+    # Sort results by video_path and start_time
+    results.sort(key=lambda x: (x["video_path"], x["start_time"]))
+
     with open(args.output_path, "w") as f:
         json.dump(results, f, indent=4)
 
