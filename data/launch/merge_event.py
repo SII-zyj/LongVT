@@ -54,6 +54,24 @@ def create_caption_messages(caption1, caption2):
     return request
 
 
+def merge_two_events(event1, event2, server):
+    caption1 = event1["caption"][0]
+    caption2 = event2["caption"][0]
+    request = create_event_messages(caption1, caption2)
+    response = server.chat_completion(request)
+    response = response.choices[0]["message"]["content"].strip()
+    if "yes" in response.lower():
+        new_event = {
+            "start_time": event1["start_time"],
+            "end_time": event2["end_time"],
+            "caption": [caption1, caption2],
+            "video_path": event1["video_path"],
+        }
+        return [new_event]
+    else:
+        return [event1, event2]
+
+
 def merge_events(events, server_name):
     server = SERVER_MAPPING[server_name]()
     # Edge case: only one event, return
@@ -62,23 +80,7 @@ def merge_events(events, server_name):
 
     # Edge case: only two events, merge them
     if len(events) == 2:
-        # Get the caption of the two events, bare string
-        caption1 = events[0]["caption"][0]
-        caption2 = events[1]["caption"][0]
-        request = create_event_messages(caption1, caption2)
-        response = server.chat_completion(request)
-        response = response.choices[0]["message"]["content"].strip()
-        if "yes" in response.lower():
-            # Merge the caption of the two events
-            new_event = {
-                "start_time": events[0]["start_time"],
-                "end_time": events[1]["end_time"],
-                "caption": [caption1, caption2],
-                "video_path": events[0]["video_path"],
-            }
-            return [new_event]
-        else:
-            return events
+        return merge_two_events(events[0], events[1], server)
 
     # If more than two events, split into two parts and merge them recursively
     if len(events) > 2:
@@ -94,32 +96,15 @@ def merge_events(events, server_name):
         event2_start_seg = event2[0]
         event1 = event1[:-1]
         event2 = event2[1:]
-        # Get the caption of the two events, bare string
-        caption1 = event1_end_seg["caption"][0]
-        caption2 = event2_start_seg["caption"][0]
-        request = create_event_messages(caption1, caption2)
-        response = server.chat_completion(request)
-        response = response.choices[0]["message"]["content"].strip()
-        # If the two events are the same event, merge them
-        if "yes" in response.lower():
-            # Merge the caption of the two events
-            new_event = {
-                "start_time": event1_end_seg["start_time"],
-                "end_time": event2_start_seg["end_time"],
-                "caption": [caption1, caption2],
-                "video_path": event1_end_seg["video_path"],
-            }
-            return event1 + [new_event] + event2
-        # If the two events are not the same event, return the original events
-        else:
-            return event1 + [event1_end_seg, event2_start_seg] + event2
+        merged_events = merge_two_events(event1_end_seg, event2_start_seg, server)
+        return event1 + merged_events + event2
 
     return events
 
 
 def run(video2caption, server_name):
     results = []
-    with ProcessPoolExecutor(max_workers=16) as executor:
+    with ProcessPoolExecutor(max_workers=32) as executor:
         futures = [executor.submit(merge_events, events, server_name) for events in video2caption.values()]
         pbar = tqdm(total=len(futures), desc="Merging events")
         for future in futures:
