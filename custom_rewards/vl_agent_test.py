@@ -636,19 +636,6 @@ def compute_score_time_r1(predict_str: str, ground_truth: str, extra_info=None, 
 
 
 if __name__ == "__main__":
-    # predict_str = "The answer is <think> 2 + 2 = 4 </think> <answer> right </answer> <answer> left </answer>"
-    # ground_truth = "left"
-    # extra_info = {
-    #     "answer": "The woman is to the left of the man who is holding the camera.",
-    #     "id": 0,
-    #     "image": "/cpfs/user/honglingyi/DATA/LLM/Vstar/gqa/images/713270.jpg",
-    #     "pred_ans": "The woman is to the right of the man who is holding the camera.",
-    #     "question": "Is the woman to the left or to the right of the man who is holding the camera?",
-    # }
-
-    # score = compute_score(predict_str, ground_truth, extra_info)
-    # print(f"Score: {score}")
-
     print("\n=== 测试 IoU 时间区间计算 ===")
 
     # 测试1: 完全重叠 - IoU应该为1.0
