@@ -1,3 +1,5 @@
+from enum import Enum
+
 VIDEO_CAPTION_PROMPT = (
     "You are a helpful assistant that summarizes the content of a video. "
     "Please provide a detailed description of the video. "
@@ -43,3 +45,11 @@ MERGE_CAPTION_PROMPT = (
     "Make sure to include all the information from the two captions."
     "Please output the merged caption in the same format as the input captions."
 )
+
+
+class Team(Enum):
+    ZUHAO = "zuhao"
+    SUDONG = "sudong"
+    KAICHEN = "kaichen"
+    KEMING = "keming"
+    XINGXUAN = "xingxuan"
