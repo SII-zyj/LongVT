@@ -300,27 +300,53 @@ def compute_score_think(predict_str: str, ground_truth: str, extra_info=None) ->
 
 def compute_score(predict_str: str, ground_truth: str, extra_info=None, **kwargs) -> float:
     is_format_error = False
-    # predict_str = "<think>" + predict_str
+
+    # 基本标签匹配检查
     count_think_1 = predict_str.count("<think>")
     count_think_2 = predict_str.count("</think>")
-    if count_think_1 != count_think_2 or count_think_1 == 0:  # exclude the situation that <think>==</think>==0
+    count_tool_call_1 = predict_str.count("<tool_call>")
+    count_tool_call_2 = predict_str.count("</tool_call>")
+    count_answer_1 = predict_str.count("<answer>")
+    count_answer_2 = predict_str.count("</answer>")
+
+    # 检查标签是否匹配
+    if count_think_1 != count_think_2 or count_think_1 == 0:
+        is_format_error = True
+    if count_tool_call_1 != count_tool_call_2:
+        is_format_error = True
+    if count_answer_1 != count_answer_2 or count_answer_1 != 1:  # 必须有且仅有一个answer
         is_format_error = True
 
-    count_vision_1 = predict_str.count("<tool_call>")
-    count_vision_2 = predict_str.count("</tool_call>")
-    if count_vision_1 != count_vision_2:
-        is_format_error = True
+    # 严格格式检查
+    if not is_format_error:
+        if count_tool_call_1 == 0:
+            # 不使用tool的情况：<think>...</think><answer>...</answer>
+            # 允许前后有空白符
+            pattern = r"^\s*<think>.*?</think>\s*<answer>.*?</answer>\s*$"
+            if not re.match(pattern, predict_str, re.DOTALL):
+                is_format_error = True
+        else:
+            # 使用tool的情况：必须严格按照 <think></think><tool_call></tool_call><think></think>... 的交替模式
+            # 使用更精确的方法检查结构
+            stripped_str = predict_str.strip()
 
-    # count_vision_response_1 = predict_str.count("<tool_response>")
-    # count_vision_response_2 = predict_str.count("</tool_response>")
-    # if count_vision_response_1 != count_vision_response_2:
-    #     is_format_error = True
+            # 检查是否以<think>开头，以</answer>结尾
+            if not (stripped_str.startswith("<think>") and stripped_str.endswith("</answer>")):
+                is_format_error = True
+            else:
+                # 分析标签序列，确保tool_call和think正确交替
+                # 找到所有开始标签的位置和类型
+                tag_pattern = r"<(think|tool_call|answer)>"
+                tags = re.findall(tag_pattern, stripped_str)
 
-    predict_no_think = predict_str.split("</think>")[-1].strip()
-    count_answer_1 = predict_no_think.count("<answer>")
-    count_answer_2 = predict_no_think.count("</answer>")
-    if count_answer_1 != count_answer_2 or count_answer_1 == 0:  ##
-        is_format_error = True
+                # 期望的模式：think, (tool_call, think)*, answer
+                expected_pattern = ["think"]
+                for _ in range(count_tool_call_1):
+                    expected_pattern.extend(["tool_call", "think"])
+                expected_pattern.append("answer")
+
+                if tags != expected_pattern:
+                    is_format_error = True
 
     if count_answer_1 == 0 or count_answer_2 == 0:
         answer_text = ""
@@ -372,8 +398,6 @@ def compute_score(predict_str: str, ground_truth: str, extra_info=None, **kwargs
         acc_reward = 0.0
         is_format_error = True
 
-    # tool_reward_base = 1.0 if count_vision_1 > 0 else 0.0
-    # tool_reward = 1.0 if count_vision_response_1 > 0 and acc_reward > 0.5 else 0.0
     format_reward = 0.0 if is_format_error else 1.0
 
     tool_use_reward = kwargs.get("tool_use_reward", False)

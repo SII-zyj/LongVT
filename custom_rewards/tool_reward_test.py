@@ -153,7 +153,7 @@ def compute_score(
     """
     # breakpoint()
     score_dict = {}
-    if data_source in ["vstar", "vl_agent", "chart", "longvideo-reason"]:
+    if data_source in ["vstar", "vl_agent", "chart", "longvideo-reason", "hacs", "ego4d_naq"]:
         from custom_rewards import vl_agent_test
 
         score, acc_score, format_reward_score, *extra = vl_agent_test.compute_score(
