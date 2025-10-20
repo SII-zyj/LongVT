@@ -329,10 +329,11 @@ def compute_score(predict_str: str, ground_truth: str, extra_info=None, **kwargs
 
     format_reward = 0.0 if is_format_error else 1.0
 
-    tool_use_reward = kwargs.get("tool_use_reward", False)
-    use_time_reward = kwargs.get("use_time_reward", False)
-    use_iou_reward = kwargs.get("use_iou_reward", False)
-    use_new_reward = kwargs.get("use_new_reward", False)
+    # args definition
+    tool_use_reward = kwargs.get("tool_use_reward", False)  # tool reawrd
+    use_time_reward = kwargs.get("use_time_reward", False)  # recall reward
+    use_iou_reward = kwargs.get("use_iou_reward", False)  # iou reward
+    use_new_reward = kwargs.get("use_new_reward", False)  # acc:format = 1:1
 
     tool_reward = 0.0
     if tool_use_reward:
@@ -546,9 +547,9 @@ def compute_score_time_r1(predict_str: str, ground_truth: str, extra_info=None, 
     if count_think_1 != count_think_2 or count_think_1 == 0:  # reward hacking
         is_format_error = True
 
-    count_vision_1 = predict_str.count("<tool_call>")
-    count_vision_2 = predict_str.count("</tool_call>")
-    if count_vision_1 != count_vision_2:
+    count_tool_call_1 = predict_str.count("<tool_call>")
+    count_tool_call_2 = predict_str.count("</tool_call>")
+    if count_tool_call_1 != count_tool_call_2:
         is_format_error = True
 
     predict_no_think = predict_str.split("</think>")[-1].strip()
@@ -556,6 +557,22 @@ def compute_score_time_r1(predict_str: str, ground_truth: str, extra_info=None, 
     count_answer_2 = predict_no_think.count("</answer>")
     if count_answer_1 != count_answer_2 or count_answer_1 == 0:
         is_format_error = True
+
+    # more strict format check
+    if not is_format_error:
+        if count_tool_call_1 == 0:
+            # <think>...</think><answer>...</answer>
+            pattern = r"^\s*<think>.*?</think>\s*<answer>.*?</answer>\s*$"
+            if not re.match(pattern, predict_str, re.DOTALL):
+                is_format_error = True
+        else:
+            # use tool case: must strictly follow the
+            # alternating pattern of <think></think><tool_call></tool_call><think></think>...
+
+            stripped_str = predict_str.strip()
+
+            if not (stripped_str.startswith("<think>") and stripped_str.endswith("</answer>")):
+                is_format_error = True
 
     # extract answer content from answer tag
     if count_answer_1 == 0 or count_answer_2 == 0:
@@ -580,7 +597,6 @@ def compute_score_time_r1(predict_str: str, ground_truth: str, extra_info=None, 
                     gt_start, gt_end = float(ground_truth_interval[0]), float(ground_truth_interval[1])
 
                     if use_recall:
-                        # 使用 Recall 计算: 真实区间中被预测区间覆盖的比例
                         # Recall = intersection / ground_truth_length
                         intersection_start = max(pred_start, gt_start)
                         intersection_end = min(pred_end, gt_end)
@@ -592,7 +608,6 @@ def compute_score_time_r1(predict_str: str, ground_truth: str, extra_info=None, 
                         else:
                             acc_reward = 1.0 if intersection > 0 else 0.0
                     else:
-                        # 使用 IoU 计算 (原有逻辑)
                         # compute IoU (Intersection over Union)
                         # compute intersection
                         intersection_start = max(pred_start, gt_start)
@@ -615,7 +630,7 @@ def compute_score_time_r1(predict_str: str, ground_truth: str, extra_info=None, 
 
     format_reward = 0.0 if is_format_error else 1.0
 
-    return 0.8 * acc_reward + 0.2 * format_reward, acc_reward, format_reward
+    return 1.0 * acc_reward + 1.0 * format_reward, acc_reward, format_reward
 
 
 def compute_score_videor1(predict_str: str, ground_truth: str, extra_info=None, **kwargs) -> float:

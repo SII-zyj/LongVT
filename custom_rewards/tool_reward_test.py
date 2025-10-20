@@ -203,6 +203,16 @@ def compute_score(
     elif data_source in ["time-r1"]:
         from custom_rewards import vl_agent_test
 
+        score, acc_score, format_reward_score = vl_agent_test.compute_score_time_r1(
+            solution_str, ground_truth, extra_info, use_recall=False
+        )
+        score_dict["score"] = score
+        score_dict["acc_score"] = acc_score
+        score_dict["format_reward_score"] = format_reward_score
+        score_dict["time_reward_score"] = -1.0  # dummy time reward
+    elif data_source == "TimeR1" or data_source.startswith("TVG-R1"):
+        from custom_rewards import vl_agent_test
+
         # read use_recall from kwargs, default to False
         use_recall = kwargs.get("use_recall", False)
         score, acc_score, format_reward_score = vl_agent_test.compute_score_time_r1(
@@ -211,6 +221,8 @@ def compute_score(
         score_dict["score"] = score
         score_dict["acc_score"] = acc_score
         score_dict["format_reward_score"] = format_reward_score
+        # dummy time_reward_score
+        score_dict["time_reward_score"] = -1.0
     elif data_source in ["longvideo-reason-think"]:
         from custom_rewards import vl_agent_test
 
