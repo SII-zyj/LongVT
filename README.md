@@ -1,5 +1,5 @@
 
-# OpenMMReasoner: Pushing the Frontiers for Multimodal Reasoning with an Open and General Recipe
+# LongVT: Incentivizing “Thinking with Long Videos” via Native Tool Calling
 
 <div align="center">
 
