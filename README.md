@@ -38,12 +38,20 @@
 ## Overview
 
 <div align="center">
-  <img src="assets/benchmark_results.png" alt="Benchmark Results" width="800"/>
+  <img src="assets/teaser.png" alt="teaser" width="800"/>
 </div>
 
-Recent advancements in large reasoning models have fueled growing interest in extending such capabilities to multimodal domains. However, despite notable progress in visual reasoning, the lack of transparent and reproducible data curation and training strategies remains a major barrier to scalable research.
+Large multimodal models (LMMs) have shown great potential for video reasoning with textual Chain-of-Thought.
+However, they remain vulnerable to hallucination, especially when processing long-form videos where evidence is sparse and temporally dispersed.
+Inspired by how humans comprehend long videos\textemdash{}by first skimming globally and then examining relevant clips for details-we introduce **LongVT**, an end-to-end agentic framework that enables ``Thinking with **Long** **V**ideos'' via interleaved Multimodal Chain-of-**T**ool-Thought.
+Specifically, we exploit LMMs' inherent temporal grounding ability as a native video cropping tool to zoom in on a specific video clip and resample finer-grained video frames.
 
-In this work, we introduce **OpenMMReasoner**, a fully transparent two-stage recipe for multimodal reasoning spanning supervised fine-tuning (SFT) and reinforcement learning (RL). In the SFT stage, we construct an 874K-sample cold-start dataset with rigorous step-by-step validation, providing a strong foundation for reasoning capabilities. The subsequent RL stage leverages a 74K-sample dataset across diverse domains to further sharpen and stabilize these abilities, resulting in a more robust and efficient learning process. Extensive evaluations demonstrate that our training recipe not only surpasses strong baselines but also highlights the critical role of data quality and training design in shaping multimodal reasoning performance. Notably, our method achieves a 11.6% improvement over the Qwen2.5-VL-7B-Instruct baseline across nine multimodal reasoning benchmarks, establishing a solid empirical foundation for future large-scale multimodal reasoning research.
+This global-to-local reasoning loop continues until answers are grounded in retrieved visual evidence.
+Given the scarcity of fine-grained question-answering (QA) data for the long video reasoning task, we curate and will release a data suite named **VideoSIAH** to facilitate both training and evaluation.
+Specifically, our training dataset consists of 247.9K samples for tool-integrated cold-start supervised fine-tuning, 1.6K samples for agentic reinforcement learning, and 15.4K samples for agentic reinforcement fine-tuning, respectively. 
+Our evaluation benchmark consists of 1,280 QA pairs that are carefully curated through a semi-automatic data pipeline with human-in-the-loop validation.
+With a meticulously designed three-stage training strategy and extensive empirical validation, LongVT consistently outperforms existing strong baselines across four challenging long-video understanding and reasoning benchmarks.
+
 
 ## Installation
 
