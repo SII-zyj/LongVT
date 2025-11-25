@@ -11,7 +11,7 @@ EXPERIMENT_NAME="longvt-7b-videosiah-1.7k"
 NNODES=8
 DATA_PATH='/path/to/your/data'
 TOOL_CONFIG_PATH="$PROJECT_DIR/examples/video_tools/config/mcp_tool_config.yaml"
-export LLM_AS_A_JUDGE_BASE=""
+export LLM_AS_A_JUDGE_BASE="your_llm_as_a_judge_base_url/v1"
 
 python3 -m verl.trainer.main_ppo \
     --config-path="$CONFIG_PATH" \
