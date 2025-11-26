@@ -151,3 +151,6 @@ We gratefully acknowledge the following open-source projects that made this work
 
 We thank the developers and contributors of these projects for their excellent work and for making their code publicly available.
 
+## ⭐ Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=EvolvingLMMs-Lab/LongVT&type=Date)](https://github.com/EvolvingLMMs-Lab/LongVT&Date)
