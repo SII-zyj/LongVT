@@ -127,3 +127,6 @@ outputs
 
 workspace/*
 data/results/*
+
+# demo
+LongVT-Demo/
