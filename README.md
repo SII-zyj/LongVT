@@ -396,12 +396,12 @@ VLM-based QA Filtering (qa_filter_vl.py)
     ↓
 iMCoTT Generation (imcott_generate.py)
     ↓
-Training Data
+Training / Evaluation Data
 ```
 
 ## Evaluation Results
 
-Please refer to our [paper](https://arxiv.org/abs/2511.16334) for detailed evaluation results and analysis.
+Please refer to our [paper](https://arxiv.org/abs/2511.20785) for detailed evaluation results and analysis.
 
 ## Citation
 
