@@ -5,10 +5,20 @@ LongVT Single Sample Inference
 Demonstrates how to perform single-sample inference with LongVT model.
 Requires a running vLLM server with tool calling enabled.
 
+Requirements:
+    1. Start vLLM server with tool calling support (see run_single_inference.sh)
+    2. Install dependencies: pip install openai qwen-vl-utils torch torchvision opencv-python
+
 Usage:
     python single_inference.py \
         --video_path /path/to/video.mp4 \
-        --question "What is happening in the video?"
+        --question "What is happening in the video?" \
+        --api_base http://localhost:8000/v1
+
+Parameters align with eval benchmark settings:
+    - fps: 1 (sample 1 frame per second)
+    - max_frames: 512 (maximum frames to extract)
+    - max_pixels: 50176 (224*224, frame resolution)
 """
 
 import argparse
@@ -115,7 +125,18 @@ SYSTEM_PROMPT = (
 
 
 def encode_video_frames(video_path: str, fps: int = 1, max_frames: int = 512, max_pixels: int = 50176) -> list:
-    """Encode video frames to base64 for model input."""
+    """
+    Encode video frames to base64 for model input.
+    
+    Args:
+        video_path: Path to video file
+        fps: Frames per second for sampling (default: 1)
+        max_frames: Maximum number of frames to extract (default: 512)
+        max_pixels: Maximum pixels per frame, e.g. 224*224=50176 (default: 50176)
+    
+    Note: These parameters should match eval benchmark settings:
+        fps=1, max_frames=512, max_pixels=50176 (224*224)
+    """
     import torch
     from qwen_vl_utils import fetch_video
     from torchvision.transforms.functional import to_pil_image
@@ -126,8 +147,8 @@ def encode_video_frames(video_path: str, fps: int = 1, max_frames: int = 512, ma
         "fps": fps,
         "min_frames": 1,
         "max_frames": max_frames,
-        "min_pixels": 28 * 28,
-        "max_pixels": max_pixels,
+        "min_pixels": 28 * 28,  # 784
+        "max_pixels": max_pixels,  # 224*224 = 50176
     }
     video_frames = fetch_video(video_ele)
     video_frames = video_frames.to(torch.uint8)
@@ -161,24 +182,24 @@ def run_inference(
     verbose: bool = True,
 ):
     """
-    Run single sample inference with LongVT.
+    Run single sample inference with LongVT model.
     
     Args:
         video_path: Path to the video file
         question: Question about the video
-        api_base: vLLM server URL (default: http://localhost:8000/v1)
+        api_base: vLLM server API base URL (default: http://localhost:8000/v1)
         api_key: API key (default: EMPTY for local vLLM)
-        model_name: Model name (auto-detected if None)
-        max_tokens: Max generation tokens
-        fps: Video sampling rate (default: 1)
-        max_frames: Max frames to encode (default: 512)
-        max_pixels: Max pixels per frame (default: 50176 = 224*224)
-        max_tool_rounds: Max tool calling iterations
-        enable_tool: Enable crop_video tool
-        verbose: Print progress logs
+        model_name: Model name (auto-detected from server if None)
+        max_tokens: Maximum tokens for generation (default: 4096)
+        fps: Frames per second for video encoding (default: 1, matches eval benchmark)
+        max_frames: Maximum number of frames to encode (default: 512, matches eval benchmark)
+        max_pixels: Maximum pixels per frame (default: 50176=224*224, matches eval benchmark)
+        max_tool_rounds: Maximum number of tool calling iterations (default: 5)
+        enable_tool: Enable crop_video tool for global-to-local reasoning (default: True)
+        verbose: Print detailed progress logs (default: True)
     
     Returns:
-        dict with 'response', 'tool_calls', 'num_rounds'
+        dict: Contains 'response' (final text), 'tool_calls' (history), 'num_rounds'
     """
     client = OpenAI(api_key=api_key, base_url=api_base)
     

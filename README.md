@@ -404,12 +404,30 @@ Training / Evaluation Data
 For quick testing or demo purposes, we provide a standalone script for single sample inference:
 
 ```bash
-# Start vLLM server and run inference
+# Basic usage (single GPU)
 bash examples/eval/run_single_inference.sh \
     longvideotool/LongVT-7B-RFT \
     /path/to/video.mp4 \
     "What is happening in the video?"
+
+# Multi-GPU inference (8 GPUs with 70% memory utilization)
+bash examples/eval/run_single_inference.sh \
+    longvideotool/LongVT-7B-RFT \
+    /path/to/video.mp4 \
+    "What is happening in the video?" \
+    False 8 0.7
 ```
+
+**Script Arguments:**
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `CKPT_PATH` | (required) | Path to model checkpoint |
+| `VIDEO_PATH` | (required) | Path to video file |
+| `QUESTION` | (required) | Question about the video |
+| `IS_QWEN3_VL` | `False` | Whether model is Qwen3-VL |
+| `DP_SIZE` | `1` | Data parallel size for multi-GPU |
+| `GPU_UTIL` | `0.9` | GPU memory utilization (0.0-1.0) |
+| `PORT` | `8000` | vLLM server port |
 
 Or run the Python script directly (requires a running vLLM server):
 
@@ -420,6 +438,8 @@ vllm serve longvideotool/LongVT-7B-RFT \
     --tool-call-parser hermes \
     --enable-auto-tool-choice \
     --trust-remote-code \
+    --data-parallel-size 8 \
+    --gpu-memory-utilization 0.7 \
     --port 8000
 
 # Then run inference
@@ -428,11 +448,12 @@ python examples/eval/single_inference.py \
     --question "What is happening in the video?"
 ```
 
-**Key Parameters:**
+**Python Script Parameters:**
 - `--fps`: Video sampling FPS (default: 1)
 - `--max_frames`: Maximum frames to encode (default: 512)
 - `--max_pixels`: Max pixels per frame (default: 50176 = 224×224)
 - `--no_tool`: Disable tool calling (for reasoning-only mode)
+- `--api_base`: vLLM server URL (default: http://localhost:8000/v1)
 
 ## Citation
 
