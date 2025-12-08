@@ -334,7 +334,22 @@ bash scripts/run_qa_generate.sh --input-dir ./captions --output-dir ./qa --num-s
 bash scripts/run_qa_generate.sh --input-dir ./captions --output-dir ./qa --num-shards 4 --shard-idx 3 &
 ```
 
-#### 4. QA Filtering (Text-based)
+#### 4. Video Summary Generation (Text-based)
+
+Generate a summary of the video content from the captions, which is required for the QA filtering step:
+
+```bash
+export OPENAI_API_KEY="your-api-key"
+
+bash scripts/run_text_summary.sh \
+    --input-dir /path/to/captions \
+    --output-file /path/to/video_summaries.json \
+    --model gpt-4o
+```
+
+You can also use other OpenAI-compatible local models by setting `OPENAI_BASE_URL` and choosing the corresponding `--model` name.
+
+#### 5. QA Filtering (Text-based)
 
 Filter QA pairs using LLM-based text analysis:
 
@@ -348,7 +363,9 @@ bash scripts/run_qa_filter_text.sh \
     --model gpt-4o
 ```
 
-#### 5. QA Filtering (VLM-based)
+Similarly, local models exposed via an OpenAI-compatible endpoint can be used here by configuring `OPENAI_BASE_URL` and `--model`.
+
+#### 6. QA Filtering (VLM-based)
 
 Filter QA pairs using Vision-Language Models to verify visual evidence:
 
@@ -361,7 +378,7 @@ bash scripts/run_qa_filter_vl.sh \
     --quality-threshold 0.85
 ```
 
-#### 6. iMCoTT Generation
+#### 7. iMCoTT Generation
 
 Generate multi-turn reasoning traces with tool calling:
 
@@ -389,6 +406,8 @@ Segment Detection (detect_segment.py)
 Clip Captioning (clip_caption.py)
     ↓
 QA Generation (qa_generate.py)
+    ↓
+Text Summary Generation (text_summary.py)
     ↓
 Text-based QA Filtering (qa_filter_text.py)
     ↓
