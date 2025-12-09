@@ -8,22 +8,21 @@
 
 <div align="center">
 
-[![Paper](https://img.shields.io/badge/Paper-000000?style=for-the-badge&logo=arxiv&logoColor=white)](https://arxiv.org/abs/2511.20785)
-[![Website](https://img.shields.io/badge/Website-000000?style=for-the-badge&logo=google-chrome&logoColor=white)](https://evolvinglmms-lab.github.io/LongVT/)
-[![Code](https://img.shields.io/badge/Code-000000?style=for-the-badge&logo=github&logoColor=white)](https://github.com/EvolvingLMMs-Lab/LongVT)
+[![arXiv](https://img.shields.io/badge/Paper-000000?style=for-the-badge&logo=arxiv&logoColor=white)](https://arxiv.org/abs/2511.20785)
+[![Page](https://img.shields.io/badge/Website-000000?style=for-the-badge&logo=google-chrome&logoColor=white)](https://evolvinglmms-lab.github.io/LongVT/)
+[![GitHub](https://img.shields.io/badge/Code-000000?style=for-the-badge&logo=github&logoColor=white)](https://github.com/EvolvingLMMs-Lab/LongVT)
 [![Data](https://img.shields.io/badge/Data-0040A1?style=for-the-badge&logo=huggingface&logoColor=ffffff)](https://huggingface.co/datasets/longvideotool/LongVT-Parquet)
-[![Models](https://img.shields.io/badge/Models-5EDDD2?style=for-the-badge&logo=huggingface&logoColor=ffffff)](https://huggingface.co/collections/lmms-lab/longvt)
+[![Model](https://img.shields.io/badge/Models-5EDDD2?style=for-the-badge&logo=huggingface&logoColor=ffffff)](https://huggingface.co/collections/lmms-lab/longvt)
 [![Demo](https://img.shields.io/badge/Demo-FF6F00?style=for-the-badge&logo=gradio&logoColor=ffffff)](https://huggingface.co/spaces/longvideotool/LongVT-Demo)
 [![Blog](https://img.shields.io/badge/Blog-lmms_lab?style=for-the-badge&logo=blogger&logoColor=white)](https://www.lmms-lab.com/posts/longvt/)
-
-[![Daily Paper](https://img.shields.io/badge/🚀_Daily_Paper-FF9D00?style=for-the-badge)](https://huggingface.co/papers/2511.20785)
+[![HF Paper](https://img.shields.io/badge/🚀_Daily_Paper-FF9D00?style=for-the-badge)](https://huggingface.co/papers/2511.20785)
 </div>
 
 ## 🎉 News
-- **[2025-12-02]**: We have created fun cartoons ([Conan_EN](https://drive.google.com/file/d/1sk9YfmtcQq0nLlI5K_G3BOziRSEjMMT0/view?usp=sharing) | [Conan_CN](https://drive.google.com/file/d/14MJEN_FBRJNJ9IYWK-fs4IbZZSgvKGAw/view?usp=sharing)) to explain LongVT. Enjoy :) Credit to the amazing [NotebookLM](https://notebooklm.google.com/) and [Gemini-3](https://blog.google/products/gemini/gemini-3/#learn-anything).
+- **[2025-12-07]**: We won the 🏆 **Top \#2 Daily Paper** (on Dec 02, 2025) and **Top \#3 Weekly Paper** (by Dec 07, 2025) on Hugging Face. Check out the [LongVT Paper Page](https://huggingface.co/papers/2511.20785)!
+- **[2025-12-02]**: We created fun cartoons ([Conan_EN](https://drive.google.com/file/d/1sk9YfmtcQq0nLlI5K_G3BOziRSEjMMT0/view?usp=sharing) | [Conan_CN](https://drive.google.com/file/d/14MJEN_FBRJNJ9IYWK-fs4IbZZSgvKGAw/view?usp=sharing)) to explain LongVT. Enjoy :) Credit to the amazing [NotebookLM](https://notebooklm.google.com/) and [Gemini-3](https://blog.google/products/gemini/gemini-3/#learn-anything).
 - **[2025-12-02]**: Join our WeChat group by scanning this [QR code](assets/qr_code.jpg).
-- **[2025-11-28]**: Demo is available [here](https://huggingface.co/spaces/longvideotool/LongVT-Demo). Give it a try!
-- **[2025-11-28]**: We release all of our codes, data, and model checkpoints! Check out the [LongVT collection on Hugging Face](https://huggingface.co/collections/lmms-lab/longvt).
+- **[2025-11-28]**: We released all of our codes, data, and model checkpoints! Check out the [LongVT Collection Pape](https://huggingface.co/collections/lmms-lab/longvt).
 
 ## Table of Contents
 
@@ -503,13 +502,12 @@ If you find this project helpful, please consider citing our paper with:
 We gratefully acknowledge the following open-source projects that made this work possible:
 
 - [**lmms-engine**](https://github.com/EvolvingLMMs-Lab/lmms-engine) for the SFT/RFT training infrastructure and tools.
-- [**verl**](https://github.com/volcengine/verl) for the RL training framework.
 - [**lmms-eval**](https://github.com/EvolvingLMMs-Lab/lmms-eval) for providing the comprehensive evaluation framework for large multimodal models.
+- [**verl**](https://github.com/volcengine/verl) for the RL training framework.
 
 We thank the developers and contributors of these projects for their excellent work and for making their code publicly available.
 
-At the moment, the `verl_0.6`-based training pipeline is still **unstable** and may exhibit inconsistencies or failures in certain configurations.  
-We therefore **strongly encourage** the community to help improve and stabilize the `verl_0.6` integration by reporting issues, submitting pull requests, and contributing fixes or enhancements.
+We warmly welcome contributions from the community to help improve and stabilize the latest `verl` integration. Furthermore, we deeply appreciate your feedback and support in any form, whether it be reporting issues, submitting pull requests, or providing fixes.
 
 ## ⭐ Star History
 
