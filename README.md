@@ -90,7 +90,7 @@ pip install --no-deps -e .
 ```
 Note: If you encounter any issues during execution, please refer to `requirement_reproduce.txt` to verify your dependency versions.
 
-We also include a `verl_0.6` branch in this repository. For environment installation regarding this branch, please refer to the official verl v0.6 documentation. However, please note that we strictly recommend using the main branch (as detailed above) for reliable reproduction, as the 0.6 branch may have consistency issues.
+We also include a `verl_0.6` branch in this repository. For environment installation regarding this branch, please refer to the official `verl` v0.6 documentation. However, please note that we strictly recommend using the main branch (as detailed above) for reliable reproduction, as the `verl_0.6` may have consistency issues.
 
 We recommend you to use separate environments if you encounter a conflict in requirements.
 
@@ -275,7 +275,7 @@ python3 -m sglang.launch_server --model-path Qwen/Qwen2.5-72B-Instruct \
 ```
 
 2. Configure the judge endpoint in your scripts:
-   Set the judge service base URL in longvt_7b_rl_train.sh via the LLM_AS_A_JUDGE_BASE environment variable.
+   Set the judge service base URL in `longvt_7b_rl_train.sh` via the `LLM_AS_A_JUDGE_BASE` environment variable.
 
 ### Data Pipeline
 
