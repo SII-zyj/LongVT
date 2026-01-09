@@ -336,12 +336,25 @@ def compute_score(predict_str: str, ground_truth: str, extra_info=None, **kwargs
     use_time_reward = kwargs.get("use_time_reward", False)  # recall reward
     use_iou_reward = kwargs.get("use_iou_reward", False)  # iou reward
     use_new_reward = kwargs.get("use_new_reward", False)  # acc:format = 1:1
+    use_frame_reward = kwargs.get("use_frame_reward", False)  # frame reward (linear decay)
 
     tool_reward = 0.0
     if tool_use_reward:
         count_vision_response_1 = predict_str.count("<tool_response>")
         tool_reward = 1.0 if count_vision_response_1 > 0 and acc_reward >= 0.5 else 0.0
         return (1.0 * acc_reward + 1.0 * format_reward + 1.0 * tool_reward, acc_reward, format_reward, tool_reward)
+    def _extract_last_tool_call(tool_name: str):
+        tool_call_pattern = r"<tool_call>(.*?)</tool_call>"
+        tool_calls = re.findall(tool_call_pattern, predict_str, re.DOTALL)
+        for tool_call in reversed(tool_calls):
+            try:
+                tool_data = ast.literal_eval(tool_call.strip())
+                if isinstance(tool_data, dict) and tool_data.get("name") == tool_name:
+                    return tool_data.get("arguments", {})
+            except (ValueError, SyntaxError, KeyError):
+                continue
+        return None
+
     if use_time_reward:
         count_vision_response_1 = predict_str.count("<tool_response>")
         if count_vision_response_1 > 0:
@@ -350,22 +363,10 @@ def compute_score(predict_str: str, ground_truth: str, extra_info=None, **kwargs
             # extract the time from the tool_response
             time_reward = 0.0
             try:
-                # find all tool_calls and get the last crop_video
-                tool_call_pattern = r"<tool_call>(.*?)</tool_call>"
-                tool_calls = re.findall(tool_call_pattern, predict_str, re.DOTALL)
-
-                # find the last crop_video tool call
+                arguments = _extract_last_tool_call("crop_video")
                 last_crop_video = None
-                for tool_call in reversed(tool_calls):  # iterate from the end
-                    try:
-                        tool_data = ast.literal_eval(tool_call.strip())
-                        if isinstance(tool_data, dict) and tool_data.get("name") == "crop_video":
-                            arguments = tool_data.get("arguments", {})
-                            if "start_time" in arguments and "end_time" in arguments:
-                                last_crop_video = (float(arguments["start_time"]), float(arguments["end_time"]))
-                                break  # found the last crop_video, exit immediately
-                    except (ValueError, SyntaxError, KeyError):
-                        continue
+                if arguments and "start_time" in arguments and "end_time" in arguments:
+                    last_crop_video = (float(arguments["start_time"]), float(arguments["end_time"]))
 
                 # calculate time reward using the last crop_video
                 if last_crop_video:
@@ -400,22 +401,10 @@ def compute_score(predict_str: str, ground_truth: str, extra_info=None, **kwargs
             # extract the time from the tool_response
             time_reward = 0.0
             try:
-                # find all tool_calls and get the last crop_video
-                tool_call_pattern = r"<tool_call>(.*?)</tool_call>"
-                tool_calls = re.findall(tool_call_pattern, predict_str, re.DOTALL)
-
-                # find the last crop_video tool call
+                arguments = _extract_last_tool_call("crop_video")
                 last_crop_video = None
-                for tool_call in reversed(tool_calls):  # iterate from the end
-                    try:
-                        tool_data = ast.literal_eval(tool_call.strip())
-                        if isinstance(tool_data, dict) and tool_data.get("name") == "crop_video":
-                            arguments = tool_data.get("arguments", {})
-                            if "start_time" in arguments and "end_time" in arguments:
-                                last_crop_video = (float(arguments["start_time"]), float(arguments["end_time"]))
-                                break  # found the last crop_video, exit immediately
-                    except (ValueError, SyntaxError, KeyError):
-                        continue
+                if arguments and "start_time" in arguments and "end_time" in arguments:
+                    last_crop_video = (float(arguments["start_time"]), float(arguments["end_time"]))
 
                 # calculate time reward using the last crop_video with IoU
                 if last_crop_video:
@@ -438,15 +427,58 @@ def compute_score(predict_str: str, ground_truth: str, extra_info=None, **kwargs
 
                         # compute IoU
                         if union > 0:
-                            time_reward = intersection / union
+                            iou = intersection / union
                         else:
-                            time_reward = 1.0 if intersection > 0 else 0.0
+                            iou = 1.0 if intersection > 0 else 0.0
+
+                        iou_refine_h0 = float(kwargs.get("iou_refine_h0", 0.5))
+                        iou_refine_delta = float(kwargs.get("iou_refine_delta", 0.05))
+                        iou_refine_eta = float(kwargs.get("iou_refine_eta", 0.1))
+                        iou_refine_base = float(kwargs.get("iou_refine_base", 1.0))
+
+                        if iou > 0:
+                            sign = 1.0 if iou >= iou_refine_h0 else -1.0
+                            step_bonus = 0.0
+                            if iou >= iou_refine_h0 and iou_refine_delta > 0:
+                                step_bonus = iou_refine_eta * int((iou - iou_refine_h0) / iou_refine_delta)
+                            time_reward = iou_refine_base * sign + step_bonus
+                        else:
+                            time_reward = 0.0
             except Exception:
                 time_reward = 0.0
         else:
             time_reward = 0.0
 
         return (1.0 * acc_reward + 1.0 * format_reward + 1.0 * time_reward, acc_reward, format_reward, time_reward)
+
+    if use_frame_reward:
+        count_vision_response_1 = predict_str.count("<tool_response>")
+        frame_reward = 0.0
+        if count_vision_response_1 > 0:
+            try:
+                arguments = _extract_last_tool_call("get_frame")
+                pred_time = None
+                if arguments and "timestamp" in arguments:
+                    pred_time = float(arguments["timestamp"])
+
+                gt_time = None
+                for key in ("frame_time", "frame_timestamp", "gt_frame_time"):
+                    if key in extra_info:
+                        gt_time = float(extra_info[key])
+                        break
+                if gt_time is None and "video_segment" in extra_info:
+                    segment = extra_info["video_segment"]
+                    if isinstance(segment, list) and len(segment) == 2:
+                        gt_time = (float(segment[0]) + float(segment[1])) / 2.0
+
+                if pred_time is not None and gt_time is not None:
+                    frame_window = float(kwargs.get("frame_reward_window", 1.0))
+                    if frame_window > 0:
+                        frame_reward = max(0.0, 1.0 - abs(pred_time - gt_time) / frame_window)
+            except Exception:
+                frame_reward = 0.0
+
+        return (1.0 * acc_reward + 1.0 * format_reward + 1.0 * frame_reward, acc_reward, format_reward, frame_reward)
 
     if use_new_reward:
         return (1.0 * acc_reward + 1.0 * format_reward, acc_reward, format_reward)
