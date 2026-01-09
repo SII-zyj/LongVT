@@ -168,6 +168,8 @@ def compute_score(
             score_dict["tool_reward_score"] = extra[0]
         elif (kwargs.get("use_time_reward", False) or kwargs.get("use_iou_reward", False)) and extra:
             score_dict["time_reward_score"] = extra[0]
+        elif kwargs.get("use_frame_reward", False) and extra:
+            score_dict["frame_reward_score"] = extra[0]
     elif data_source in ["thinklite_eureka", "xince"]:
         from custom_rewards import vl_agent
 
@@ -200,6 +202,8 @@ def compute_score(
             score_dict["tool_reward_score"] = -1.0  # videor1 doesn't have tool rewards
         elif kwargs.get("use_time_reward", False) or kwargs.get("use_iou_reward", False):
             score_dict["time_reward_score"] = -1.0  # videor1 doesn't have time/iou rewards
+        elif kwargs.get("use_frame_reward", False):
+            score_dict["frame_reward_score"] = -1.0  # videor1 doesn't have frame rewards
     elif data_source in ["time-r1"]:
         from custom_rewards import vl_agent
 
@@ -223,6 +227,8 @@ def compute_score(
         score_dict["format_reward_score"] = format_reward_score
         # dummy time_reward_score
         score_dict["time_reward_score"] = -1.0
+        if kwargs.get("use_frame_reward", False):
+            score_dict["frame_reward_score"] = -1.0
     elif data_source in ["longvideo-reason-think"]:
         from custom_rewards import vl_agent
 

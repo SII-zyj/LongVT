@@ -22,6 +22,7 @@ import cv2
 import torch
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ImageContent
+from PIL import Image
 from pydantic import Field
 from qwen_vl_utils import fetch_video
 from torchvision.transforms.functional import to_pil_image
@@ -87,6 +88,9 @@ def crop_video(
     if not os.path.exists(video_path):
         logger.error(f"Video file not found: {video_path}")
         raise FileNotFoundError(f"Video file not found: {video_path}")
+    if not os.path.isfile(video_path):
+        logger.error(f"Video path is not a file: {video_path}")
+        raise FileNotFoundError(f"Video path is not a file: {video_path}")
 
     # verify video duration
     cap = cv2.VideoCapture(video_path)
@@ -132,6 +136,74 @@ def crop_video(
         return image_contents
     except Exception as e:
         raise RuntimeError(f"Failed to process video {video_path}: {str(e)}") from e
+
+
+@app.tool(name="get_frame", description="Extract a single frame from a video at a specified timestamp.")
+def get_frame(
+    video_path: Annotated[str, Field(description="Path to the video file")] = None,
+    timestamp: Annotated[float, Field(description="Timestamp in seconds for the desired frame")] = None,
+) -> ImageContent:
+    """
+    Extract a single frame from a video at a specified timestamp.
+
+    Args:
+        video_path (str): Path to the video file.
+        timestamp (float): Timestamp in seconds for the desired frame.
+
+    Returns:
+        ImageContent: The extracted frame as a base64-encoded PNG.
+    """
+    logger.info(f"Validating parameters: video_path={video_path}, timestamp={timestamp}")
+
+    if video_path is None:
+        logger.error("Missing video_path parameter")
+        raise ValueError("video_path parameter is required")
+
+    if timestamp is None:
+        logger.error("Missing timestamp parameter")
+        raise ValueError("timestamp parameter is required")
+
+    if not video_path or video_path.strip() == "":
+        logger.error(f"Empty video_path parameter: '{video_path}'")
+        raise ValueError("video_path cannot be empty")
+
+    if timestamp < 0:
+        logger.error(f"Invalid timestamp: {timestamp}")
+        raise ValueError(f"timestamp must be non-negative, got {timestamp}")
+
+    if not os.path.exists(video_path):
+        logger.error(f"Video file not found: {video_path}")
+        raise FileNotFoundError(f"Video file not found: {video_path}")
+    if not os.path.isfile(video_path):
+        logger.error(f"Video path is not a file: {video_path}")
+        raise FileNotFoundError(f"Video path is not a file: {video_path}")
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video file: {video_path}")
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    duration = frame_count / fps if fps > 0 else 0
+
+    if timestamp >= duration:
+        cap.release()
+        raise ValueError(f"timestamp ({timestamp}s) exceeds video duration ({duration:.2f}s)")
+
+    cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
+    success, frame = cap.read()
+    cap.release()
+
+    if not success:
+        raise RuntimeError(f"Failed to read frame at {timestamp}s from {video_path}")
+
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    image = Image.fromarray(frame_rgb)
+    output_buffer = BytesIO()
+    image.save(output_buffer, format="PNG")
+    byte_data = output_buffer.getvalue()
+    base64_str = base64.b64encode(byte_data).decode("utf-8")
+    return ImageContent(type="image", data=base64_str, mimeType="image/png")
 
 
 # video_zoom_in_tool

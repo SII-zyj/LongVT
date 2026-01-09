@@ -9,4 +9,5 @@ tools:
       # optional
       tool_selected_list: 
         - crop_video
+        - get_frame
         #- video_zoom_in_tool
