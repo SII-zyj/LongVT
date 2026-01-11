@@ -24,6 +24,7 @@ import ast
 import asyncio
 import base64
 import json
+import math
 import os
 import re
 import sys
@@ -65,6 +66,7 @@ We will follow a coarse-to-fine multi-stage approach:
 Phase 1 (global skim & planning — first <think> block):
 - Reconstruct the visual storyline of the entire video by interpreting the sequence of provided frames (silent video). Do not mention that you are looking at static images or frames; narrate it as a continuous video scene.
 - In ≈ 4–6 flowing sentences, narrate what the camera shows across the whole video (settings, actors, transitions).
+- Timestamp during thinking: As you narrate, sprinkle human-readable time anchors for key moments (not only the final windows). Allowed styles include: ≈297s, around 298–300s, from 4:56 to 5:15, 295–300s, or [296.34s – 320.76s].
 
 Output format:
 <think>...</think>
@@ -91,9 +93,20 @@ Do not mention this hint in your reasoning. Continue the trajectory and reach a 
 
 FINE_INSPECTION_TEMPLATE = """You are now in Phase 2 (fine-grained inspection), round {round_idx}.
 
-Continue the existing response without repeating earlier content. Append exactly one <tool_call> block,
-then exactly one <think> block. Use 3–6 sentences in <think> with evidence and integration. Mention
-time anchors in natural language. Only output <answer> when you have enough evidence.
+Continue the existing response without repeating earlier content. First append exactly one <think> block,
+then decide whether to output a <tool_call> or a final <answer>. Use 3–6 sentences in <think> with evidence,
+integration, and reflection. Mention time anchors in natural language. If evidence is sufficient, output
+<answer> and stop; otherwise output exactly one <tool_call> and stop.
+
+This round includes:
+- Attached frames: images from the video segment of this interval (low resolution, ~224px).
+- The original QUESTION (for reference): {question}
+
+In the <think> block you append this round, include three parts (as prose, not bullet labels):
+1) Evidence: what this window shows that helps answer the question.
+2) Integration: how this confirms or revises your earlier hypothesis (mark outdated bits as "revised: …").
+3) Self-reflection: whether this window was mis-localized; if so, how you would correct it; otherwise note
+   that it suffices for its subgoal.
 """
 
 JUDGE_PROMPT_GROUNDING = """You are a strict judge for temporal grounding.
@@ -323,17 +336,42 @@ def encode_video_frames(
     output_dir: Optional[str],
     clip_id: str,
 ) -> Tuple[List[Dict[str, Any]], List[str], int]:
+    import cv2
     import torch
     from qwen_vl_utils import fetch_video
     from torchvision.transforms.functional import to_pil_image
 
+    cap = cv2.VideoCapture(video_path)
+    duration = None
+    if cap.isOpened():
+        video_fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+        total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0
+        if video_fps > 0 and total_frames > 0:
+            duration = total_frames / video_fps
+    cap.release()
+
+    if duration and duration > 0:
+        if duration >= 512:
+            target_max_frames = min(max_frames, 512)
+            target_fps = target_max_frames / duration
+        else:
+            target_fps = 1.0
+            target_max_frames = min(max_frames, max(1, int(math.ceil(duration))))
+    else:
+        target_fps = float(fps)
+        target_max_frames = max_frames
+
     max_payload_bytes = int(max_payload_mb * 1024 * 1024)
-    current_max_frames = max_frames
+    current_max_frames = target_max_frames
     while True:
+        if duration and duration > 0:
+            effective_fps = min(target_fps, current_max_frames / duration)
+        else:
+            effective_fps = target_fps
         video_ele = {
             "type": "video",
             "video": f"file://{video_path}",
-            "fps": fps,
+            "fps": effective_fps,
             "min_frames": 1,
             "max_frames": current_max_frames,
             "min_pixels": 28 * 28,
@@ -367,7 +405,8 @@ def encode_video_frames(
                     frame_paths.append(frame_path)
             return image_contents, frame_paths, total_bytes
 
-        current_max_frames = max(1, current_max_frames // 2)
+        reduction = max(1, current_max_frames // 10)
+        current_max_frames = max(1, current_max_frames - reduction)
 
 
 def _validate_response(text: str) -> bool:
@@ -787,20 +826,33 @@ def generate_sample(sample: Dict[str, Any], config: GenerationConfig) -> Dict[st
             }
         )
 
+    initial_hint_added = False
+    tool_args = parse_tool_calls(transcript, "crop_video")
+    if tool_args and "start_time" in tool_args and "end_time" in tool_args:
+        pred_interval = (float(tool_args["start_time"]), float(tool_args["end_time"]))
+        overlap = overlap_ratio(pred_interval, gt_interval)
+        if overlap < config.overlap_threshold and corrections < config.max_corrections:
+            hint = HINT_TEMPLATE.format(gt_start=gt_interval[0], gt_end=gt_interval[1])
+            _append_user(messages, hint)
+            corrections += 1
+            initial_hint_added = True
+
     max_rounds = max(1, config.max_corrections + 1)
     rounds_used = 1
     while rounds_used < max_rounds:
-        tool_args = parse_tool_calls(transcript, "crop_video")
-        if tool_args and "start_time" in tool_args and "end_time" in tool_args:
-            pred_interval = (float(tool_args["start_time"]), float(tool_args["end_time"]))
-            overlap = overlap_ratio(pred_interval, gt_interval)
-            if overlap < config.overlap_threshold and corrections < config.max_corrections:
-                hint = HINT_TEMPLATE.format(gt_start=gt_interval[0], gt_end=gt_interval[1])
-                _append_user(messages, hint)
-                corrections += 1
+        if not (rounds_used == 1 and initial_hint_added):
+            tool_args = parse_tool_calls(transcript, "crop_video")
+            if tool_args and "start_time" in tool_args and "end_time" in tool_args:
+                pred_interval = (float(tool_args["start_time"]), float(tool_args["end_time"]))
+                overlap = overlap_ratio(pred_interval, gt_interval)
+                if overlap < config.overlap_threshold and corrections < config.max_corrections:
+                    hint = HINT_TEMPLATE.format(gt_start=gt_interval[0], gt_end=gt_interval[1])
+                    _append_user(messages, hint)
+                    corrections += 1
 
         round_prompt = FINE_INSPECTION_TEMPLATE.format(
             round_idx=rounds_used + 1,
+            question=sample["question"],
         )
         _append_user(messages, round_prompt)
         response = call_model(client, config, messages)
