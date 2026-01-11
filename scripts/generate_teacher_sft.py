@@ -28,6 +28,7 @@ import os
 import re
 import sys
 import time
+import mimetypes
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -48,6 +49,10 @@ You may call tools to inspect video segments. Use the tool only when necessary.
 For every function call, wrap a JSON object with the function name and its arguments inside <tool_call></tool_call> tags.
 Do NOT output any <tool_response> tags. The tool response will be injected by the system after execution.
 The JSON inside <tool_call> must include a "name" key and an "arguments" object.
+
+First-turn decision rule:
+- Think first. If you need to call a tool, output exactly one <tool_call> and stop (no <answer> in that response).
+- If you already have enough evidence to answer, output a single <answer>...</answer> and stop (no <tool_call>).
 
 Thinking requirements:
 - Each <think> must be non-empty prose (3–6 sentences) with clear evidence and integration.
@@ -75,7 +80,8 @@ TOOL_RESPONSE_OK = "The tool executed successfully."
 _FRAME_CACHE: Dict[str, Tuple[List[Dict[str, Any]], int]] = {}
 
 
-USER_TEMPLATE = """VIDEO_PATH: {video_path}
+USER_TEMPLATE = """You are now in Phase 1 (global skim & planning). Follow the system instructions.
+VIDEO_PATH: {video_path}
 QUESTION: {question}"""
 
 
@@ -596,7 +602,11 @@ def _maybe_override_answer(
     return response_steps, transcript
 
 
-def _build_tool_response_content(tool_runs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _build_tool_response_content(
+    tool_runs: List[Dict[str, Any]],
+    *,
+    encode_images: bool,
+) -> List[Dict[str, Any]]:
     response_text = "\n".join(
         run.get("response_text", TOOL_RESPONSE_OK) for run in tool_runs
     )
@@ -605,9 +615,26 @@ def _build_tool_response_content(tool_runs: List[Dict[str, Any]]) -> List[Dict[s
     ]
     for run in tool_runs:
         for image_path in run.get("saved_images", []):
-            content.append({"type": "image_url", "image_url": {"url": image_path}})
+            if encode_images:
+                data_url = _image_file_to_data_url(image_path)
+                if data_url:
+                    content.append({"type": "image_url", "image_url": {"url": data_url}})
+            else:
+                content.append({"type": "image_url", "image_url": {"url": image_path}})
     content.append({"type": "text", "text": "</tool_response>"})
     return content
+
+
+def _image_file_to_data_url(image_path: str) -> Optional[str]:
+    if not image_path or not os.path.exists(image_path):
+        return None
+    mime_type, _ = mimetypes.guess_type(image_path)
+    if not mime_type:
+        mime_type = "image/png"
+    with open(image_path, "rb") as f:
+        data = f.read()
+    encoded = base64.b64encode(data).decode("utf-8")
+    return f"data:{mime_type};base64,{encoded}"
 
 
 def build_longvt_output(
@@ -644,7 +671,12 @@ def build_longvt_output(
             }
         )
         if tool_runs:
-            messages.append({"role": "user", "content": _build_tool_response_content(tool_runs)})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": _build_tool_response_content(tool_runs, encode_images=False),
+                }
+            )
 
     return {
         "id": sample["clip_id"],
@@ -748,7 +780,12 @@ def generate_sample(sample: Dict[str, Any], config: GenerationConfig) -> Dict[st
         messages[1]["content"] = [{"type": "text", "text": user_text}]
     if response_tool_runs:
         _strip_previous_tool_responses(messages)
-        messages.append({"role": "user", "content": _build_tool_response_content(response_tool_runs)})
+        messages.append(
+            {
+                "role": "user",
+                "content": _build_tool_response_content(response_tool_runs, encode_images=True),
+            }
+        )
 
     max_rounds = max(1, config.max_corrections + 1)
     rounds_used = 1
@@ -780,7 +817,12 @@ def generate_sample(sample: Dict[str, Any], config: GenerationConfig) -> Dict[st
         _append_assistant(messages, response_clean)
         if response_tool_runs:
             _strip_previous_tool_responses(messages)
-            messages.append({"role": "user", "content": _build_tool_response_content(response_tool_runs)})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": _build_tool_response_content(response_tool_runs, encode_images=True),
+                }
+            )
 
         answer_interval = parse_answer_interval(transcript)
         answer_text = parse_answer_text(transcript)
