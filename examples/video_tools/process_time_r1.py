@@ -99,8 +99,8 @@ def main():
     # tool use instruction
     instruction_following = (
         r"You FIRST think about the reasoning process as an internal monologue and then provide the final answer. "
-        r"Think first, call **crop_video** if needed, then answer. Format strictly as:  <think>...</think>  "
-        r"<tool_call>...</tool_call> (if tools needed)  <answer>...</answer> "
+        r"Think first, call **crop_video** or **get_frame** if needed, then answer. Format strictly as:  "
+        r"<think>...</think>  <tool_call>...</tool_call> (if tools needed)  <answer>...</answer> "
     )
 
     # with Pool(processes=16) as pool:
@@ -171,6 +171,9 @@ def main():
                             # "execute_kwargs": {},
                             # "calc_reward_kwargs": {},
                             # "release_kwargs": {},
+                        },
+                        "get_frame": {
+                            "create_kwargs": {"dummy": "dummy"},
                         },
                     },
                 },

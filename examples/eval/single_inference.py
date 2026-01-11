@@ -90,6 +90,44 @@ def crop_video_local(video_path: str, start_time: float, end_time: float) -> lis
     return image_contents
 
 
+def get_frame_local(video_path: str, timestamp: float) -> list:
+    """
+    Extract a single frame and return it as a base64 encoded image.
+    Mirrors the behavior of MCP server's get_frame tool.
+    """
+    import cv2
+    from PIL import Image
+
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"Video file not found: {video_path}")
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video: {video_path}")
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    duration = frame_count / fps if fps > 0 else 0
+
+    if timestamp >= duration:
+        cap.release()
+        raise ValueError(f"timestamp ({timestamp}s) exceeds video duration ({duration:.2f}s)")
+
+    cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
+    success, frame = cap.read()
+    cap.release()
+
+    if not success:
+        raise RuntimeError(f"Failed to read frame at {timestamp}s from {video_path}")
+
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    image = Image.fromarray(frame_rgb)
+    buf = BytesIO()
+    image.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+    return [{"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}]
+
+
 # ============== Tool Schema ==============
 CROP_VIDEO_TOOL = {
     "type": "function",
@@ -108,11 +146,27 @@ CROP_VIDEO_TOOL = {
     }
 }
 
+GET_FRAME_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_frame",
+        "description": "Extract a single frame from a video at a specified timestamp.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "video_path": {"type": "string", "description": "Path to the video file"},
+                "timestamp": {"type": "number", "description": "Timestamp in seconds for the desired frame"}
+            },
+            "required": ["video_path", "timestamp"]
+        }
+    }
+}
+
 
 # ============== Prompts ==============
 # For tool calling mode (default)
 TOOL_PROMPT = (
-    "Think first, call **crop_video** if needed, then answer. "
+    "Think first, call **crop_video** or **get_frame** if needed, then answer. "
     "Format strictly as: <think>...</think> <tool_call>...</tool_call> (if needed) <answer>...</answer>."
 )
 
@@ -195,7 +249,7 @@ def run_inference(
         max_frames: Maximum number of frames to encode (default: 512, matches eval benchmark)
         max_pixels: Maximum pixels per frame (default: 50176=224*224, matches eval benchmark)
         max_tool_rounds: Maximum number of tool calling iterations (default: 5)
-        enable_tool: Enable crop_video tool for global-to-local reasoning (default: True)
+        enable_tool: Enable crop_video/get_frame tools for global-to-local reasoning (default: True)
         verbose: Print detailed progress logs (default: True)
     
     Returns:
@@ -243,7 +297,7 @@ def run_inference(
         }
         
         if enable_tool:
-            kwargs["tools"] = [CROP_VIDEO_TOOL]
+            kwargs["tools"] = [CROP_VIDEO_TOOL, GET_FRAME_TOOL]
             kwargs["tool_choice"] = "auto"
         
         response = client.chat.completions.create(**kwargs)
@@ -293,6 +347,31 @@ def run_inference(
                         
                         tool_content = result_images + [
                             {"type": "text", "text": f"Cropped {func_args['start_time']}s-{func_args['end_time']}s, got {len(result_images)} frames."}
+                        ]
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": tool_content
+                        })
+                    except Exception as e:
+                        if verbose:
+                            print(f"[TOOL ERROR] {e}")
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": [{"type": "text", "text": f"Error: {e}"}]
+                        })
+                elif func_name == "get_frame":
+                    try:
+                        result_images = get_frame_local(
+                            video_path=func_args["video_path"],
+                            timestamp=func_args["timestamp"]
+                        )
+                        if verbose:
+                            print("[TOOL RESULT] Extracted 1 frame")
+
+                        tool_content = result_images + [
+                            {"type": "text", "text": f"Extracted frame at {func_args['timestamp']}s."}
                         ]
                         messages.append({
                             "role": "tool",
@@ -370,4 +449,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
