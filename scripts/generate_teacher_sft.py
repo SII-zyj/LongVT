@@ -82,7 +82,8 @@ TOOL_RESPONSE_OK = "The tool executed successfully."
 _FRAME_CACHE: Dict[str, Tuple[List[Dict[str, Any]], int]] = {}
 
 
-USER_TEMPLATE = """VIDEO_PATH: {video_path}
+USER_TEMPLATE = """You are now in Phase 1 (global skim & planning). Follow the system instructions.
+VIDEO_PATH: {video_path}
 QUESTION: {question}"""
 
 
