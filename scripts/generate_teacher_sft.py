@@ -454,6 +454,9 @@ def encode_video_frames(
 
 
 def _validate_response(text: str) -> bool:
+    stripped = text.lstrip()
+    if not stripped.startswith("<think>"):
+        return False
     think_blocks = re.findall(r"<think>.*?</think>", text, re.DOTALL)
     if len(think_blocks) != 1:
         return False
