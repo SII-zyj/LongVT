@@ -62,7 +62,7 @@ GROUND_TRUTH_ANSWER: {gt_answer}
 Thinking requirements:
 - Each <think> must be non-empty prose (3–6 sentences) with clear evidence and integration.
 - Mention time anchors in natural language when you refer to video evidence.
-- Use plain ASCII punctuation; avoid placeholders, blank/placeholder/gibberish content, and non-ASCII symbols.
+- Use plain ASCII punctuation; avoid placeholders and gibberish.
 
 We will follow a coarse-to-fine multi-stage approach:
 Phase 1 (global skim & planning — first <think> block):
@@ -71,7 +71,6 @@ Phase 1 (global skim & planning — first <think> block):
 - Timestamp during thinking: As you narrate, sprinkle human-readable time anchors for key moments (not only the final windows). Allowed styles include: ≈297s, around 298–300s, from 4:56 to 5:15, 295–300s, or [296.34s – 320.76s].
 
 First-turn decision rule:
-- Place all reasoning inside a single <think>...</think> section, and do not repeat <think> tags in the same turn.
 - Think first. If you need to call a tool, output exactly one <tool_call> and stop.
 - If you already have enough evidence to answer, output a single answer (no explanations) and stop.
 
@@ -106,8 +105,7 @@ TRAJECTORY_USER_TEMPLATE = (
 
 FINE_INSPECTION_TEMPLATE = """You are now in Phase 2 (fine-grained inspection), round {round_idx}.
 
-Continue the existing response without repeating earlier content. First append a <think>...</think> block
-containing your reasoning, and do not repeat <think> tags in the same turn,
+Continue the existing response without repeating earlier content. First append exactly one <think> block,
 then decide whether to output a <tool_call> or a final <answer>. Use 3–6 sentences in <think> with evidence,
 integration, and reflection. Mention time anchors in natural language. If evidence is sufficient, output a
 complete <answer>...</answer> block (with both opening and closing tags) and stop; otherwise output exactly
@@ -119,8 +117,7 @@ This round includes:
 - The original QUESTION (for reference): {question}
 - Hint (ground-truth time range): [{gt_start:.3f}, {gt_end:.3f}]
 
-In the <think> block you append this round, avoid blank/placeholder/gibberish content and non-ASCII symbols.
-Then include three parts (as prose, not bullet labels):
+In the <think> block you append this round, include three parts (as prose, not bullet labels):
 1) Evidence: what this window shows that helps answer the question.
 2) Integration: how this confirms or revises your earlier hypothesis (mark outdated bits as "revised: …").
 3) Self-reflection: whether this window was mis-localized; if so, how you would correct it; otherwise note
@@ -332,7 +329,6 @@ def build_messages(
         gt_answer=gt_answer,
         frame_hint=frame_hint,
     )
-    print(f"[INFO] system prompt clip_id={sample.get('clip_id')}\n{system_prompt}", flush=True)
     user_content = [{"type": "text", "text": user_text}] + frame_contents
     return [
         {"role": "system", "content": system_prompt},
@@ -450,24 +446,11 @@ def encode_video_frames(
 
 
 def _validate_response(text: str) -> bool:
-    think_blocks = re.findall(r"<think>.*?</think>", text, re.DOTALL)
-    if len(think_blocks) != 1:
-        return False
-    first_think_start = text.find("<think>")
-    first_think_end = text.find("</think>")
-    if first_think_start == -1 or first_think_end == -1:
-        return False
-    if first_think_end < first_think_start:
-        return False
     tool_call_pattern = r"<tool_call>(.*?)</tool_call>"
     tool_calls = re.findall(tool_call_pattern, text, re.DOTALL)
     if not tool_calls:
-        answer_start = text.find("<answer>")
-        answer_end = text.find("</answer>")
-        return answer_start != -1 and answer_end != -1 and first_think_end < answer_start
+        return "<answer>" in text and "</answer>" in text
     for tool_call in tool_calls:
-        if first_think_end > text.find("<tool_call>"):
-            return False
         tool_call = tool_call.strip()
         try:
             data = json.loads(tool_call)
@@ -493,7 +476,6 @@ def call_model(client: OpenAI, config: GenerationConfig, messages: List[Dict[str
                 timeout=config.timeout_s,
             )
             content = resp.choices[0].message.content or ""
-            print(f"[INFO] model response\n{content}", flush=True)
             if _validate_response(content):
                 return content
             print("[WARN] Invalid response format. Retrying...", file=sys.stderr)
