@@ -52,6 +52,7 @@ For every function call, wrap a JSON object with the function name and its argum
 Do NOT output any <tool_response> tags. The tool response will be injected by the system after execution.
 The JSON inside <tool_call> must include a "name" key and an "arguments" object.
 You will receive a series of image frames sampled from the video (at most 512 frames) for reference.
+Frame sampling timeline hint: {frame_hint}
 
 Input you receive:
 VIDEO_PATH: {video_path}
@@ -61,7 +62,7 @@ GROUND_TRUTH_ANSWER: {gt_answer}
 Thinking requirements:
 - Each <think> must be non-empty prose (3–6 sentences) with clear evidence and integration.
 - Mention time anchors in natural language when you refer to video evidence.
-- Use plain ASCII punctuation; avoid placeholders and gibberish.
+- Use plain ASCII punctuation; avoid placeholders, blank/placeholder/gibberish content, and non-ASCII symbols.
 
 We will follow a coarse-to-fine multi-stage approach:
 Phase 1 (global skim & planning — first <think> block):
@@ -70,6 +71,7 @@ Phase 1 (global skim & planning — first <think> block):
 - Timestamp during thinking: As you narrate, sprinkle human-readable time anchors for key moments (not only the final windows). Allowed styles include: ≈297s, around 298–300s, from 4:56 to 5:15, 295–300s, or [296.34s – 320.76s].
 
 First-turn decision rule:
+- Place all reasoning inside a single <think>...</think> section, and do not repeat <think> tags in the same turn.
 - Think first. If you need to call a tool, output exactly one <tool_call> and stop.
 - If you already have enough evidence to answer, output a single answer (no explanations) and stop.
 
@@ -90,7 +92,7 @@ For each function call, return a json object with function name and arguments wi
 
 TOOL_RESPONSE_OK = "The tool executed successfully."
 
-_FRAME_CACHE: Dict[str, Tuple[List[Dict[str, Any]], int]] = {}
+_FRAME_CACHE: Dict[str, Tuple[List[Dict[str, Any]], int, str]] = {}
 
 
 USER_TEMPLATE = """QUESTION: {question}"""
@@ -104,18 +106,25 @@ TRAJECTORY_USER_TEMPLATE = (
 
 FINE_INSPECTION_TEMPLATE = """You are now in Phase 2 (fine-grained inspection), round {round_idx}.
 
-Continue the existing response without repeating earlier content. First append exactly one <think> block,
+Continue the existing response without repeating earlier content. First append a <think>...</think> block
+containing your reasoning, and do not repeat <think> tags in the same turn,
 then decide whether to output a <tool_call> or a final <answer>. Use 3–6 sentences in <think> with evidence,
 integration, and reflection. Mention time anchors in natural language. If evidence is sufficient, output a
 complete <answer>...</answer> block (with both opening and closing tags) and stop; otherwise output exactly
 one <tool_call>...</tool_call> block and stop. If you still cannot answer after a crop, keep calling the tool
 with new segments until you can answer.
+Output format example:
+<think>...</think>
+<tool_call>...</tool_call>
+<answer>YOUR_FINAL_ANSWER</answer>
 
 This round includes:
 - Attached frames: images from the video segment of this interval (low resolution, ~224px).
 - The original QUESTION (for reference): {question}
+- Hint (ground-truth time range): [{gt_start:.3f}, {gt_end:.3f}]
 
-In the <think> block you append this round, include three parts (as prose, not bullet labels):
+In the <think> block you append this round, avoid blank/placeholder/gibberish content and non-ASCII symbols.
+Then include three parts (as prose, not bullet labels):
 1) Evidence: what this window shows that helps answer the question.
 2) Integration: how this confirms or revises your earlier hypothesis (mark outdated bits as "revised: …").
 3) Self-reflection: whether this window was mis-localized; if so, how you would correct it; otherwise note
@@ -280,13 +289,13 @@ def _get_cached_frames(
     video_path: str,
     config: GenerationConfig,
     clip_id: str,
-) -> Tuple[List[Dict[str, Any]], List[str], int]:
+) -> Tuple[List[Dict[str, Any]], List[str], int, str]:
     print(f"[INFO] encode frames start clip_id={clip_id} video_path={video_path}", flush=True)
     cached = _FRAME_CACHE.get(video_path)
     if cached:
-        frame_contents, total_bytes = cached
-        return frame_contents, [], total_bytes
-    frame_contents, frame_paths, total_bytes = encode_video_frames(
+        frame_contents, total_bytes, frame_hint = cached
+        return frame_contents, [], total_bytes, frame_hint
+    frame_contents, frame_paths, total_bytes, frame_hint = encode_video_frames(
         video_path,
         fps=config.fps,
         max_frames=config.max_frames,
@@ -295,8 +304,8 @@ def _get_cached_frames(
         output_dir=config.frame_output_dir,
         clip_id=clip_id,
     )
-    _FRAME_CACHE[video_path] = (frame_contents, total_bytes)
-    return frame_contents, frame_paths, total_bytes
+    _FRAME_CACHE[video_path] = (frame_contents, total_bytes, frame_hint)
+    return frame_contents, frame_paths, total_bytes, frame_hint
 
 
 def build_messages(
@@ -314,23 +323,47 @@ def build_messages(
     user_text = USER_TEMPLATE.format(
         question=sample["question"],
     )
+    frame_contents, frame_paths, total_bytes, frame_hint = _get_cached_frames(
+        sample["video_path"],
+        config,
+        sample["clip_id"],
+    )
     system_prompt = render_system_prompt(
         SYSTEM_PROMPT,
         video_path=sample["video_path"],
         gt_start=f"{qa_start:.3f}",
         gt_end=f"{qa_end:.3f}",
         gt_answer=gt_answer,
+        frame_hint=frame_hint,
     )
-    frame_contents, frame_paths, total_bytes = _get_cached_frames(
-        sample["video_path"],
-        config,
-        sample["clip_id"],
-    )
+    print(f"[INFO] system prompt clip_id={sample.get('clip_id')}\n{system_prompt}", flush=True)
     user_content = [{"type": "text", "text": user_text}] + frame_contents
     return [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_content},
     ], frame_paths, total_bytes, user_text
+
+
+def build_frame_hint(
+    *,
+    effective_fps: float,
+    frame_count: int,
+    duration: Optional[float],
+) -> str:
+    if effective_fps <= 0 or frame_count <= 0:
+        return "Frame timing unavailable."
+    interval = 1.0 / effective_fps
+    last_ts = max(0.0, (frame_count - 1) * interval)
+    if duration and duration > 0:
+        clamped_last = min(last_ts, duration)
+        return (
+            f"Frames sampled at ~{effective_fps:.3f} fps (≈{interval:.2f}s between frames) "
+            f"from 0s to about {clamped_last:.2f}s of a {duration:.2f}s video."
+        )
+    return (
+        f"Frames sampled at ~{effective_fps:.3f} fps (≈{interval:.2f}s between frames) "
+        f"from 0s to about {last_ts:.2f}s."
+    )
 
 
 def encode_video_frames(
@@ -341,7 +374,7 @@ def encode_video_frames(
     max_payload_mb: float,
     output_dir: Optional[str],
     clip_id: str,
-) -> Tuple[List[Dict[str, Any]], List[str], int]:
+) -> Tuple[List[Dict[str, Any]], List[str], int, str]:
     import cv2
     import torch
     from qwen_vl_utils import fetch_video
@@ -409,18 +442,36 @@ def encode_video_frames(
                     frame_path = os.path.join(clip_dir, f"frame_{idx:03d}.png")
                     img.save(frame_path, format="PNG")
                     frame_paths.append(frame_path)
-            return image_contents, frame_paths, total_bytes
+            frame_hint = build_frame_hint(
+                effective_fps=effective_fps,
+                frame_count=len(images),
+                duration=duration,
+            )
+            return image_contents, frame_paths, total_bytes, frame_hint
 
         reduction = max(1, current_max_frames // 10)
         current_max_frames = max(1, current_max_frames - reduction)
 
 
 def _validate_response(text: str) -> bool:
+    think_blocks = re.findall(r"<think>.*?</think>", text, re.DOTALL)
+    if len(think_blocks) != 1:
+        return False
+    first_think_start = text.find("<think>")
+    first_think_end = text.find("</think>")
+    if first_think_start == -1 or first_think_end == -1:
+        return False
+    if first_think_end < first_think_start:
+        return False
     tool_call_pattern = r"<tool_call>(.*?)</tool_call>"
     tool_calls = re.findall(tool_call_pattern, text, re.DOTALL)
     if not tool_calls:
-        return "<answer>" in text and "</answer>" in text
+        answer_start = text.find("<answer>")
+        answer_end = text.find("</answer>")
+        return answer_start != -1 and answer_end != -1 and first_think_end < answer_start
     for tool_call in tool_calls:
+        if first_think_end > text.find("<tool_call>"):
+            return False
         tool_call = tool_call.strip()
         try:
             data = json.loads(tool_call)
@@ -446,6 +497,7 @@ def call_model(client: OpenAI, config: GenerationConfig, messages: List[Dict[str
                 timeout=config.timeout_s,
             )
             content = resp.choices[0].message.content or ""
+            print(f"[INFO] model response\n{content}", flush=True)
             if _validate_response(content):
                 return content
             print("[WARN] Invalid response format. Retrying...", file=sys.stderr)
@@ -685,8 +737,8 @@ def build_longvt_output(
 def generate_sample(sample: Dict[str, Any], config: GenerationConfig) -> Dict[str, Any]:
     client = OpenAI(api_key=config.api_key, base_url=config.api_base)
     messages, frame_paths, frame_bytes, user_text = build_messages(sample, config)
-    qa_start = sample.get("qa_start_time", sample.get("clip_start_time"))
-    qa_end = sample.get("qa_end_time", sample.get("clip_end_time"))
+    qa_start = float(sample.get("qa_start_time", sample.get("clip_start_time", 0.0)) or 0.0)
+    qa_end = float(sample.get("qa_end_time", sample.get("clip_end_time", 0.0)) or 0.0)
     gt_answer = sample.get("answer")
     gt_answer_interval = parse_gt_interval(gt_answer)
     is_grounding = gt_answer_interval is not None
@@ -760,6 +812,8 @@ def generate_sample(sample: Dict[str, Any], config: GenerationConfig) -> Dict[st
         round_prompt = FINE_INSPECTION_TEMPLATE.format(
             round_idx=rounds_used + 1,
             question=sample["question"],
+            gt_start=qa_start,
+            gt_end=qa_end,
         )
         _append_user(messages, round_prompt)
         response = call_model(client, config, messages)
@@ -918,8 +972,12 @@ def main() -> None:
                             result["error"] = "invalid first trajectory format"
                             out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
                             out_f.flush()
-                            print("[ERROR] First trajectory failed validation; aborting.", file=sys.stderr)
-                            return
+                            print(
+                                "[WARN] First trajectory failed validation; continuing.",
+                                file=sys.stderr,
+                            )
+                            first_checked = True
+                            continue
                         first_checked = True
                     out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
                     out_f.flush()
@@ -943,10 +1001,11 @@ def main() -> None:
                                 out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
                                 out_f.flush()
                                 print(
-                                    "[ERROR] First trajectory failed validation; aborting.",
+                                    "[WARN] First trajectory failed validation; continuing.",
                                     file=sys.stderr,
                                 )
-                                return
+                                first_checked = True
+                                continue
                             first_checked = True
                         out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
                         out_f.flush()
