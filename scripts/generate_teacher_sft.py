@@ -33,7 +33,7 @@ import mimetypes
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from openai import OpenAI
@@ -280,6 +280,7 @@ def _get_cached_frames(
     config: GenerationConfig,
     clip_id: str,
 ) -> Tuple[List[Dict[str, Any]], List[str], int]:
+    print(f"[INFO] encode frames start clip_id={clip_id} video_path={video_path}", flush=True)
     cached = _FRAME_CACHE.get(video_path)
     if cached:
         frame_contents, total_bytes = cached
@@ -301,6 +302,11 @@ def build_messages(
     sample: Dict[str, Any],
     config: GenerationConfig,
 ) -> Tuple[List[Dict[str, Any]], List[str], int, str]:
+    print(
+        "[INFO] build_messages start clip_id="
+        f"{sample.get('clip_id')} video_path={sample.get('video_path')}",
+        flush=True,
+    )
     qa_start = float(sample.get("qa_start_time", sample.get("clip_start_time", 0.0)))
     qa_end = float(sample.get("qa_end_time", sample.get("clip_end_time", 0.0)))
     gt_answer = sample.get("answer")
@@ -807,11 +813,14 @@ def generate_sample(sample: Dict[str, Any], config: GenerationConfig) -> Dict[st
 
 def worker(entry: Dict[str, Any], config_dict: Dict[str, Any]) -> Dict[str, Any]:
     config = GenerationConfig(**config_dict)
+    clip_id = entry.get("clip_id")
+    video_path = entry.get("video_path")
+    print(f"[INFO] worker start clip_id={clip_id} video_path={video_path}", flush=True)
     try:
         return generate_sample(entry, config)
     except Exception as exc:
         return {
-            "clip_id": entry.get("clip_id"),
+            "clip_id": clip_id,
             "error": str(exc),
         }
 
@@ -852,6 +861,12 @@ def parse_args() -> argparse.Namespace:
         help="Disable preloading base64 frames before generation.",
     )
     parser.set_defaults(preload_frames=False)
+    parser.add_argument(
+        "--executor",
+        choices=("process", "thread", "inline"),
+        default="process",
+        help="Execution backend for workers.",
+    )
     return parser.parse_args()
 
 
@@ -892,14 +907,10 @@ def main() -> None:
 
     with open(args.output, "a", encoding="utf-8") as out_f:
         with tqdm(total=len(entries), desc="Generating") as progress:
-            with ProcessPoolExecutor(max_workers=args.workers) as executor:
-                futures = [
-                    executor.submit(worker, entry, config.__dict__)
-                    for entry in entries
-                ]
+            if args.executor == "inline":
                 first_checked = False
-                for future in as_completed(futures):
-                    result = future.result()
+                for entry in entries:
+                    result = worker(entry, config.__dict__)
                     if validate_first and not first_checked:
                         transcript = result.get("metadata", {}).get("transcript", "")
                         if transcript and not _validate_response(transcript):
@@ -912,6 +923,33 @@ def main() -> None:
                     out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
                     out_f.flush()
                     progress.update(1)
+            else:
+                executor_cls = ProcessPoolExecutor
+                if args.executor == "thread":
+                    executor_cls = ThreadPoolExecutor
+                with executor_cls(max_workers=args.workers) as executor:
+                    futures = [
+                        executor.submit(worker, entry, config.__dict__)
+                        for entry in entries
+                    ]
+                    first_checked = False
+                    for future in as_completed(futures):
+                        result = future.result()
+                        if validate_first and not first_checked:
+                            transcript = result.get("metadata", {}).get("transcript", "")
+                            if transcript and not _validate_response(transcript):
+                                result["error"] = "invalid first trajectory format"
+                                out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
+                                out_f.flush()
+                                print(
+                                    "[ERROR] First trajectory failed validation; aborting.",
+                                    file=sys.stderr,
+                                )
+                                return
+                            first_checked = True
+                        out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
+                        out_f.flush()
+                        progress.update(1)
 
 
 if __name__ == "__main__":
