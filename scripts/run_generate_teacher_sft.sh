@@ -7,16 +7,12 @@ set -euo pipefail
 #     /path/to/input.jsonl \
 #     /path/to/output.jsonl \
 #     gemini-2.5-flash \
-#     http://localhost:8000/v1 \
-#     gpt-4.1 \
-#     2
+#     http://localhost:8000/v1
 
 INPUT_JSONL="${1:-}"
 OUTPUT_JSONL="${2:-}"
 MODEL_NAME="${3:-}"
 API_BASE="${4:-}"
-JUDGE_MODEL="${5:-}"
-MAX_CORRECTIONS="${6:-1}"
 
 if [[ -z "${INPUT_JSONL}" || -z "${OUTPUT_JSONL}" || -z "${MODEL_NAME}" || -z "${API_BASE}" ]]; then
   echo "Usage: $0 <input_jsonl> <output_jsonl> <model_name> <api_base>"
@@ -24,7 +20,6 @@ if [[ -z "${INPUT_JSONL}" || -z "${OUTPUT_JSONL}" || -z "${MODEL_NAME}" || -z "$
 fi
 
 export OPENAI_API_KEY="${OPENAI_API_KEY:-EMPTY}"
-export JUDGE_API_KEY="${JUDGE_API_KEY:-${OPENAI_API_KEY}}"
 
 python scripts/generate_teacher_sft.py \
   --input "${INPUT_JSONL}" \
@@ -41,12 +36,4 @@ python scripts/generate_teacher_sft.py \
   --fps 1 \
   --max-frames 512 \
   --max-pixels 50176 \
-  --max-payload-mb 20 \
-  --overlap-threshold 0.3 \
-  --max-corrections "${MAX_CORRECTIONS}" \
-  --answer-iou-threshold 0.5 \
-  ${JUDGE_MODEL:+--judge-model "${JUDGE_MODEL}"} \
-  ${JUDGE_MODEL:+--judge-api-base "${API_BASE}"} \
-  ${JUDGE_MODEL:+--judge-api-key "${JUDGE_API_KEY}"} \
-  ${JUDGE_MODEL:+--judge-max-tokens 16} \
-  ${JUDGE_MODEL:+--judge-temperature 0.0}
+  --max-payload-mb 20

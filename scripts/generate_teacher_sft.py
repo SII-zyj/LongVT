@@ -24,13 +24,16 @@ import ast
 import asyncio
 import base64
 import json
+import math
 import os
 import re
 import sys
 import time
+import mimetypes
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from openai import OpenAI
@@ -48,26 +51,32 @@ You may call tools to inspect video segments. Use the tool only when necessary.
 For every function call, wrap a JSON object with the function name and its arguments inside <tool_call></tool_call> tags.
 Do NOT output any <tool_response> tags. The tool response will be injected by the system after execution.
 The JSON inside <tool_call> must include a "name" key and an "arguments" object.
+You will receive a series of image frames sampled from the video (at most 512 frames) for reference.
+
+Input you receive:
+VIDEO_PATH: {video_path}
+GROUND_TRUTH_TIME: [{gt_start:.3f}, {gt_end:.3f}]
+GROUND_TRUTH_ANSWER: {gt_answer}
 
 Thinking requirements:
 - Each <think> must be non-empty prose (3–6 sentences) with clear evidence and integration.
 - Mention time anchors in natural language when you refer to video evidence.
 - Use plain ASCII punctuation; avoid placeholders and gibberish.
-- If you output a <tool_call> in the first round, do not output <answer> in that same response.
-- In the first round, either output a <tool_call> (no <answer>), or output a complete <answer>...</answer> block.
 
 We will follow a coarse-to-fine multi-stage approach:
 Phase 1 (global skim & planning — first <think> block):
 - Reconstruct the visual storyline of the entire video by interpreting the sequence of provided frames (silent video). Do not mention that you are looking at static images or frames; narrate it as a continuous video scene.
 - In ≈ 4–6 flowing sentences, narrate what the camera shows across the whole video (settings, actors, transitions).
+- Timestamp during thinking: As you narrate, sprinkle human-readable time anchors for key moments (not only the final windows). Allowed styles include: ≈297s, around 298–300s, from 4:56 to 5:15, 295–300s, or [296.34s – 320.76s].
+
+First-turn decision rule:
+- Think first. If you need to call a tool, output exactly one <tool_call> and stop.
+- If you already have enough evidence to answer, output a single answer (no explanations) and stop.
 
 Output format:
 <think>...</think>
 <tool_call>...</tool_call>
-<answer>...</answer>
-
-Repeat <think> and <tool_call> until you have enough evidence to answer, then output <answer>.
-If no tool is needed, omit <tool_call>.
+<answer>YOUR_FINAL_ANSWER</answer>
 """
 
 TOOL_RESPONSE_OK = "The tool executed successfully."
@@ -75,19 +84,27 @@ TOOL_RESPONSE_OK = "The tool executed successfully."
 _FRAME_CACHE: Dict[str, Tuple[List[Dict[str, Any]], int]] = {}
 
 
-USER_TEMPLATE = """VIDEO_PATH: {video_path}
-QUESTION: {question}"""
+USER_TEMPLATE = """QUESTION: {question}"""
 
-
-HINT_TEMPLATE = """Hint: The relevant time range is [{gt_start:.3f}, {gt_end:.3f}].
-Do not mention this hint in your reasoning. Continue the trajectory and reach a final <answer>.
-"""
 
 FINE_INSPECTION_TEMPLATE = """You are now in Phase 2 (fine-grained inspection), round {round_idx}.
 
-Continue the existing response without repeating earlier content. Append exactly one <tool_call> block,
-then exactly one <think> block. Use 3–6 sentences in <think> with evidence and integration. Mention
-time anchors in natural language. Only output <answer> when you have enough evidence.
+Continue the existing response without repeating earlier content. First append exactly one <think> block,
+then decide whether to output a <tool_call> or a final <answer>. Use 3–6 sentences in <think> with evidence,
+integration, and reflection. Mention time anchors in natural language. If evidence is sufficient, output a
+complete <answer>...</answer> block (with both opening and closing tags) and stop; otherwise output exactly
+one <tool_call>...</tool_call> block and stop. If you still cannot answer after a crop, keep calling the tool
+with new segments until you can answer.
+
+This round includes:
+- Attached frames: images from the video segment of this interval (low resolution, ~224px).
+- The original QUESTION (for reference): {question}
+
+In the <think> block you append this round, include three parts (as prose, not bullet labels):
+1) Evidence: what this window shows that helps answer the question.
+2) Integration: how this confirms or revises your earlier hypothesis (mark outdated bits as "revised: …").
+3) Self-reflection: whether this window was mis-localized; if so, how you would correct it; otherwise note
+   that it suffices for its subgoal.
 """
 
 JUDGE_PROMPT_GROUNDING = """You are a strict judge for temporal grounding.
@@ -123,14 +140,6 @@ class GenerationConfig:
     max_tokens: int
     temperature: float
     timeout_s: Optional[float]
-    overlap_threshold: float
-    max_corrections: int
-    answer_iou_threshold: float
-    judge_model: Optional[str]
-    judge_api_base: Optional[str]
-    judge_api_key: Optional[str]
-    judge_max_tokens: int
-    judge_temperature: float
     mcp_server_path: Optional[str]
     tool_output_dir: Optional[str]
     fps: int
@@ -244,26 +253,6 @@ def parse_gt_interval(answer: Any) -> Optional[Tuple[float, float]]:
     return None
 
 
-def overlap_ratio(pred: Tuple[float, float], gt: Tuple[float, float]) -> float:
-    pred_start, pred_end = pred
-    gt_start, gt_end = gt
-    intersection = max(0.0, min(pred_end, gt_end) - max(pred_start, gt_start))
-    gt_len = max(0.0, gt_end - gt_start)
-    if gt_len <= 0:
-        return 0.0
-    return intersection / gt_len
-
-
-def iou_ratio(pred: Tuple[float, float], gt: Tuple[float, float]) -> float:
-    pred_start, pred_end = pred
-    gt_start, gt_end = gt
-    intersection = max(0.0, min(pred_end, gt_end) - max(pred_start, gt_start))
-    union = max(pred_end, gt_end) - min(pred_start, gt_start)
-    if union <= 0:
-        return 0.0
-    return intersection / union
-
-
 def _get_cached_frames(
     video_path: str,
     config: GenerationConfig,
@@ -290,11 +279,17 @@ def build_messages(
     sample: Dict[str, Any],
     config: GenerationConfig,
 ) -> Tuple[List[Dict[str, Any]], List[str], int, str]:
+    qa_start = float(sample.get("qa_start_time", sample.get("clip_start_time", 0.0)))
+    qa_end = float(sample.get("qa_end_time", sample.get("clip_end_time", 0.0)))
+    gt_answer = sample.get("answer")
     user_text = USER_TEMPLATE.format(
-        video_path=sample["video_path"],
-        clip_start=float(sample["clip_start_time"]),
-        clip_end=float(sample["clip_end_time"]),
         question=sample["question"],
+    )
+    system_prompt = SYSTEM_PROMPT.format(
+        video_path=sample["video_path"],
+        gt_start=qa_start,
+        gt_end=qa_end,
+        gt_answer=gt_answer,
     )
     frame_contents, frame_paths, total_bytes = _get_cached_frames(
         sample["video_path"],
@@ -303,7 +298,7 @@ def build_messages(
     )
     user_content = [{"type": "text", "text": user_text}] + frame_contents
     return [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_content},
     ], frame_paths, total_bytes, user_text
 
@@ -317,17 +312,42 @@ def encode_video_frames(
     output_dir: Optional[str],
     clip_id: str,
 ) -> Tuple[List[Dict[str, Any]], List[str], int]:
+    import cv2
     import torch
     from qwen_vl_utils import fetch_video
     from torchvision.transforms.functional import to_pil_image
 
+    cap = cv2.VideoCapture(video_path)
+    duration = None
+    if cap.isOpened():
+        video_fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+        total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0
+        if video_fps > 0 and total_frames > 0:
+            duration = total_frames / video_fps
+    cap.release()
+
+    if duration and duration > 0:
+        if duration >= 512:
+            target_max_frames = min(max_frames, 512)
+            target_fps = target_max_frames / duration
+        else:
+            target_fps = 1.0
+            target_max_frames = min(max_frames, max(1, int(math.ceil(duration))))
+    else:
+        target_fps = float(fps)
+        target_max_frames = max_frames
+
     max_payload_bytes = int(max_payload_mb * 1024 * 1024)
-    current_max_frames = max_frames
+    current_max_frames = target_max_frames
     while True:
+        if duration and duration > 0:
+            effective_fps = min(target_fps, current_max_frames / duration)
+        else:
+            effective_fps = target_fps
         video_ele = {
             "type": "video",
             "video": f"file://{video_path}",
-            "fps": fps,
+            "fps": effective_fps,
             "min_frames": 1,
             "max_frames": current_max_frames,
             "min_pixels": 28 * 28,
@@ -361,7 +381,8 @@ def encode_video_frames(
                     frame_paths.append(frame_path)
             return image_contents, frame_paths, total_bytes
 
-        current_max_frames = max(1, current_max_frames // 2)
+        reduction = max(1, current_max_frames // 10)
+        current_max_frames = max(1, current_max_frames - reduction)
 
 
 def _validate_response(text: str) -> bool:
@@ -516,42 +537,6 @@ def save_tool_images(
     return saved
 
 
-def judge_answer(
-    config: GenerationConfig,
-    question: str,
-    gt_answer: str,
-    pred_answer: str,
-) -> bool:
-    if not config.judge_model:
-        return False
-    client = OpenAI(
-        api_key=config.judge_api_key or config.api_key,
-        base_url=config.judge_api_base or config.api_base,
-    )
-    prompt = JUDGE_PROMPT_VQA.format(
-        question=question,
-        gt_answer=gt_answer,
-        pred_answer=pred_answer,
-    )
-    messages = [{"role": "system", "content": prompt}]
-    delay_s = 1.0
-    while True:
-        try:
-            resp = client.chat.completions.create(
-                model=config.judge_model,
-                messages=messages,
-                temperature=config.judge_temperature,
-                max_tokens=config.judge_max_tokens,
-                timeout=config.timeout_s,
-            )
-            content = (resp.choices[0].message.content or "").strip().upper()
-            return content.startswith("YES")
-        except Exception as exc:
-            print(f"[WARN] Judge call failed: {exc}. Retrying in {delay_s:.1f}s...", file=sys.stderr)
-            time.sleep(delay_s)
-            delay_s = min(delay_s * 1.5, 30.0)
-
-
 def _append_assistant(messages: List[Dict[str, Any]], text: str) -> None:
     messages.append({"role": "assistant", "content": text})
 
@@ -576,27 +561,11 @@ def _strip_previous_tool_responses(messages: List[Dict[str, Any]]) -> None:
     ]
 
 
-def _replace_answer_text(text: str, new_answer: str) -> str:
-    return re.sub(r"<answer>.*?</answer>", f"<answer>{new_answer}</answer>", text, flags=re.S | re.I)
-
-
-def _maybe_override_answer(
-    response_steps: List[Tuple[str, List[Dict[str, Any]]]],
-    transcript: str,
-    ok: bool,
-    gt_answer: str,
-) -> Tuple[List[Tuple[str, List[Dict[str, Any]]]], str]:
-    if not ok or not response_steps:
-        return response_steps, transcript
-    last_text, last_tools = response_steps[-1]
-    if "<answer>" not in last_text:
-        return response_steps, transcript
-    response_steps[-1] = (_replace_answer_text(last_text, gt_answer), last_tools)
-    transcript = _replace_answer_text(transcript, gt_answer)
-    return response_steps, transcript
-
-
-def _build_tool_response_content(tool_runs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _build_tool_response_content(
+    tool_runs: List[Dict[str, Any]],
+    *,
+    encode_images: bool,
+) -> List[Dict[str, Any]]:
     response_text = "\n".join(
         run.get("response_text", TOOL_RESPONSE_OK) for run in tool_runs
     )
@@ -605,9 +574,26 @@ def _build_tool_response_content(tool_runs: List[Dict[str, Any]]) -> List[Dict[s
     ]
     for run in tool_runs:
         for image_path in run.get("saved_images", []):
-            content.append({"type": "image_url", "image_url": {"url": image_path}})
+            if encode_images:
+                data_url = _image_file_to_data_url(image_path)
+                if data_url:
+                    content.append({"type": "image_url", "image_url": {"url": data_url}})
+            else:
+                content.append({"type": "image_url", "image_url": {"url": image_path}})
     content.append({"type": "text", "text": "</tool_response>"})
     return content
+
+
+def _image_file_to_data_url(image_path: str) -> Optional[str]:
+    if not image_path or not os.path.exists(image_path):
+        return None
+    mime_type, _ = mimetypes.guess_type(image_path)
+    if not mime_type:
+        mime_type = "image/png"
+    with open(image_path, "rb") as f:
+        data = f.read()
+    encoded = base64.b64encode(data).decode("utf-8")
+    return f"data:{mime_type};base64,{encoded}"
 
 
 def build_longvt_output(
@@ -617,16 +603,22 @@ def build_longvt_output(
     frame_paths: List[str],
     frame_bytes: int,
 ) -> Dict[str, Any]:
+    qa_start = float(sample.get("qa_start_time", sample.get("clip_start_time", 0.0)))
+    qa_end = float(sample.get("qa_end_time", sample.get("clip_end_time", 0.0)))
+    gt_answer = sample.get("answer")
     user_text = USER_TEMPLATE.format(
-        video_path=sample["video_path"],
-        clip_start=float(sample["clip_start_time"]),
-        clip_end=float(sample["clip_end_time"]),
         question=sample["question"],
+    )
+    system_prompt = SYSTEM_PROMPT.format(
+        video_path=sample["video_path"],
+        gt_start=qa_start,
+        gt_end=qa_end,
+        gt_answer=gt_answer,
     )
     messages: List[Dict[str, Any]] = [
         {
             "role": "system",
-            "content": [{"type": "text", "text": SYSTEM_PROMPT}],
+            "content": [{"type": "text", "text": system_prompt}],
         },
         {
             "role": "user",
@@ -644,7 +636,12 @@ def build_longvt_output(
             }
         )
         if tool_runs:
-            messages.append({"role": "user", "content": _build_tool_response_content(tool_runs)})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": _build_tool_response_content(tool_runs, encode_images=False),
+                }
+            )
 
     return {
         "id": sample["clip_id"],
@@ -667,14 +664,11 @@ def generate_sample(sample: Dict[str, Any], config: GenerationConfig) -> Dict[st
     messages, frame_paths, frame_bytes, user_text = build_messages(sample, config)
     qa_start = sample.get("qa_start_time", sample.get("clip_start_time"))
     qa_end = sample.get("qa_end_time", sample.get("clip_end_time"))
-    gt_interval = (float(qa_start), float(qa_end))
     gt_answer = sample.get("answer")
-    gt_answer_text = str(gt_answer) if gt_answer is not None else ""
     gt_answer_interval = parse_gt_interval(gt_answer)
     is_grounding = gt_answer_interval is not None
 
     transcript = ""
-    corrections = 0
     tool_runs: List[Dict[str, Any]] = []
     response_steps: List[Tuple[str, List[Dict[str, Any]]]] = []
 
@@ -687,14 +681,6 @@ def generate_sample(sample: Dict[str, Any], config: GenerationConfig) -> Dict[st
         if is_grounding and answer_interval:
             response_steps.append((response, []))
             _append_assistant(messages, response)
-            answer_iou = iou_ratio(answer_interval, gt_interval)
-            ok = answer_iou >= config.answer_iou_threshold
-            response_steps, transcript = _maybe_override_answer(
-                response_steps,
-                transcript,
-                ok,
-                f"[{gt_interval[0]}, {gt_interval[1]}]",
-            )
             return build_longvt_output(
                 sample,
                 response_steps,
@@ -705,16 +691,6 @@ def generate_sample(sample: Dict[str, Any], config: GenerationConfig) -> Dict[st
         if not is_grounding and answer_text:
             response_steps.append((response, []))
             _append_assistant(messages, response)
-            if config.judge_model:
-                ok = judge_answer(config, sample["question"], gt_answer_text, answer_text)
-            else:
-                ok = answer_text.strip().lower() == gt_answer_text.strip().lower()
-            response_steps, transcript = _maybe_override_answer(
-                response_steps,
-                transcript,
-                ok,
-                gt_answer_text,
-            )
             return build_longvt_output(
                 sample,
                 response_steps,
@@ -748,22 +724,19 @@ def generate_sample(sample: Dict[str, Any], config: GenerationConfig) -> Dict[st
         messages[1]["content"] = [{"type": "text", "text": user_text}]
     if response_tool_runs:
         _strip_previous_tool_responses(messages)
-        messages.append({"role": "user", "content": _build_tool_response_content(response_tool_runs)})
+        messages.append(
+            {
+                "role": "user",
+                "content": _build_tool_response_content(response_tool_runs, encode_images=True),
+            }
+        )
 
-    max_rounds = max(1, config.max_corrections + 1)
+    max_rounds = 2
     rounds_used = 1
     while rounds_used < max_rounds:
-        tool_args = parse_tool_calls(transcript, "crop_video")
-        if tool_args and "start_time" in tool_args and "end_time" in tool_args:
-            pred_interval = (float(tool_args["start_time"]), float(tool_args["end_time"]))
-            overlap = overlap_ratio(pred_interval, gt_interval)
-            if overlap < config.overlap_threshold and corrections < config.max_corrections:
-                hint = HINT_TEMPLATE.format(gt_start=gt_interval[0], gt_end=gt_interval[1])
-                _append_user(messages, hint)
-                corrections += 1
-
         round_prompt = FINE_INSPECTION_TEMPLATE.format(
             round_idx=rounds_used + 1,
+            question=sample["question"],
         )
         _append_user(messages, round_prompt)
         response = call_model(client, config, messages)
@@ -780,19 +753,16 @@ def generate_sample(sample: Dict[str, Any], config: GenerationConfig) -> Dict[st
         _append_assistant(messages, response_clean)
         if response_tool_runs:
             _strip_previous_tool_responses(messages)
-            messages.append({"role": "user", "content": _build_tool_response_content(response_tool_runs)})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": _build_tool_response_content(response_tool_runs, encode_images=True),
+                }
+            )
 
         answer_interval = parse_answer_interval(transcript)
         answer_text = parse_answer_text(transcript)
         if is_grounding and answer_interval:
-            answer_iou = iou_ratio(answer_interval, gt_interval)
-            ok = answer_iou >= config.answer_iou_threshold
-            response_steps, transcript = _maybe_override_answer(
-                response_steps,
-                transcript,
-                ok,
-                f"[{gt_interval[0]}, {gt_interval[1]}]",
-            )
             return build_longvt_output(
                 sample,
                 response_steps,
@@ -801,16 +771,6 @@ def generate_sample(sample: Dict[str, Any], config: GenerationConfig) -> Dict[st
                 frame_bytes,
             )
         if not is_grounding and answer_text:
-            if config.judge_model:
-                ok = judge_answer(config, sample["question"], gt_answer_text, answer_text)
-            else:
-                ok = answer_text.strip().lower() == gt_answer_text.strip().lower()
-            response_steps, transcript = _maybe_override_answer(
-                response_steps,
-                transcript,
-                ok,
-                gt_answer_text,
-            )
             return build_longvt_output(
                 sample,
                 response_steps,
@@ -851,14 +811,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature.")
     parser.add_argument("--timeout", type=float, default=None, help="Request timeout in seconds.")
     parser.add_argument("--workers", type=int, default=4, help="Number of processes.")
-    parser.add_argument("--overlap-threshold", type=float, default=0.3, help="GT overlap threshold for correction.")
-    parser.add_argument("--max-corrections", type=int, default=1, help="Max correction attempts per sample.")
-    parser.add_argument("--answer-iou-threshold", type=float, default=0.5, help="IoU threshold for acceptance.")
-    parser.add_argument("--judge-model", default=None, help="Optional judge model for acceptance.")
-    parser.add_argument("--judge-api-base", default=None, help="Optional judge API base URL.")
-    parser.add_argument("--judge-api-key", default=None, help="Optional judge API key.")
-    parser.add_argument("--judge-max-tokens", type=int, default=16, help="Max tokens for judge response.")
-    parser.add_argument("--judge-temperature", type=float, default=0.0, help="Judge temperature.")
     parser.add_argument("--mcp-server-path", default=None, help="Path to MCP server script for tool calls.")
     parser.add_argument("--tool-output-dir", default=None, help="Directory to save tool images.")
     parser.add_argument("--fps", type=int, default=1, help="Frames per second for video sampling.")
@@ -898,14 +850,6 @@ def main() -> None:
         max_tokens=args.max_tokens,
         temperature=args.temperature,
         timeout_s=args.timeout,
-        overlap_threshold=args.overlap_threshold,
-        max_corrections=args.max_corrections,
-        answer_iou_threshold=args.answer_iou_threshold,
-        judge_model=args.judge_model,
-        judge_api_base=args.judge_api_base,
-        judge_api_key=args.judge_api_key,
-        judge_max_tokens=args.judge_max_tokens,
-        judge_temperature=args.judge_temperature,
         mcp_server_path=args.mcp_server_path,
         tool_output_dir=args.tool_output_dir,
         fps=args.fps,
@@ -932,19 +876,26 @@ def main() -> None:
 
     with open(args.output, "a", encoding="utf-8") as out_f:
         with tqdm(total=len(entries), desc="Generating") as progress:
-            for idx, entry in enumerate(entries):
-                result = worker(entry, config.__dict__)
-                if idx == 0 and validate_first:
-                    transcript = result.get("metadata", {}).get("transcript", "")
-                    if transcript and not _validate_response(transcript):
-                        result["error"] = "invalid first trajectory format"
-                        out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
-                        out_f.flush()
-                        print("[ERROR] First trajectory failed validation; aborting.", file=sys.stderr)
-                        return
-                out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
-                out_f.flush()
-                progress.update(1)
+            with ProcessPoolExecutor(max_workers=args.workers) as executor:
+                futures = [
+                    executor.submit(worker, entry, config.__dict__)
+                    for entry in entries
+                ]
+                first_checked = False
+                for future in as_completed(futures):
+                    result = future.result()
+                    if validate_first and not first_checked:
+                        transcript = result.get("metadata", {}).get("transcript", "")
+                        if transcript and not _validate_response(transcript):
+                            result["error"] = "invalid first trajectory format"
+                            out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
+                            out_f.flush()
+                            print("[ERROR] First trajectory failed validation; aborting.", file=sys.stderr)
+                            return
+                        first_checked = True
+                    out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
+                    out_f.flush()
+                    progress.update(1)
 
 
 if __name__ == "__main__":
