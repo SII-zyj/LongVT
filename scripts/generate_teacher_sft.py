@@ -195,6 +195,7 @@ def render_system_prompt(prompt: str, **kwargs: Any) -> str:
     rendered = prompt
     for key, value in kwargs.items():
         rendered = rendered.replace(f"{{{key}}}", str(value))
+        rendered = rendered.replace(f"{{{key}:.3f}}", str(value))
     return rendered
 
 
