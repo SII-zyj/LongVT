@@ -191,6 +191,13 @@ def read_input(path: str) -> Iterable[Dict[str, Any]]:
     yield from read_jsonl(path)
 
 
+def render_system_prompt(prompt: str, **kwargs: Any) -> str:
+    rendered = prompt
+    for key, value in kwargs.items():
+        rendered = rendered.replace(f"{{{key}}}", str(value))
+    return rendered
+
+
 def load_existing_ids(path: str) -> set[str]:
     if not os.path.exists(path):
         return set()
@@ -300,10 +307,11 @@ def build_messages(
     user_text = USER_TEMPLATE.format(
         question=sample["question"],
     )
-    system_prompt = SYSTEM_PROMPT.format(
+    system_prompt = render_system_prompt(
+        SYSTEM_PROMPT,
         video_path=sample["video_path"],
-        gt_start=qa_start,
-        gt_end=qa_end,
+        gt_start=f"{qa_start:.3f}",
+        gt_end=f"{qa_end:.3f}",
         gt_answer=gt_answer,
     )
     frame_contents, frame_paths, total_bytes = _get_cached_frames(
@@ -618,8 +626,6 @@ def build_longvt_output(
     frame_paths: List[str],
     frame_bytes: int,
 ) -> Dict[str, Any]:
-    qa_start = float(sample.get("qa_start_time", sample.get("clip_start_time", 0.0)))
-    qa_end = float(sample.get("qa_end_time", sample.get("clip_end_time", 0.0)))
     user_text = TRAJECTORY_USER_TEMPLATE.format(
         question=sample["question"],
         video_path=sample["video_path"],
