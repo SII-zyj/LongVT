@@ -50,17 +50,7 @@ You may call tools to inspect video segments. Use the tool only when necessary.
 For every function call, wrap a JSON object with the function name and its arguments inside <tool_call></tool_call> tags.
 Do NOT output any <tool_response> tags. The tool response will be injected by the system after execution.
 The JSON inside <tool_call> must include a "name" key and an "arguments" object.
-
-First-turn decision rule:
-- Think first. If you need to call a tool, output exactly one <tool_call> and stop (no <answer> in that response).
-- If you already have enough evidence to answer, output a single <answer>...</answer> and stop (no <tool_call>).
-
-Thinking requirements:
-- Each <think> must be non-empty prose (3–6 sentences) with clear evidence and integration.
-- Mention time anchors in natural language when you refer to video evidence.
-- Use plain ASCII punctuation; avoid placeholders and gibberish.
-- If you output a <tool_call> in the first round, do not output <answer> in that same response.
-- In the first round, either output a <tool_call> (no <answer>), or output a complete <answer>...</answer> block.
+You will receive a series of image frames sampled from the video (at most 512 frames) for reference.
 
 We will follow a coarse-to-fine multi-stage approach:
 Phase 1 (global skim & planning — first <think> block):
@@ -68,13 +58,14 @@ Phase 1 (global skim & planning — first <think> block):
 - In ≈ 4–6 flowing sentences, narrate what the camera shows across the whole video (settings, actors, transitions).
 - Timestamp during thinking: As you narrate, sprinkle human-readable time anchors for key moments (not only the final windows). Allowed styles include: ≈297s, around 298–300s, from 4:56 to 5:15, 295–300s, or [296.34s – 320.76s].
 
+First-turn decision rule:
+- Think first. If you need to call a tool, output exactly one <tool_call> and stop.
+- If you already have enough evidence to answer, output a single answer (no explanations) and stop.
+
 Output format:
 <think>...</think>
 <tool_call>...</tool_call>
-<answer>...</answer>
-
-Repeat <think> and <tool_call> until you have enough evidence to answer, then output <answer>.
-If no tool is needed, omit <tool_call>.
+<answer>YOUR_FINAL_ANSWER</answer>
 """
 
 TOOL_RESPONSE_OK = "The tool executed successfully."
@@ -88,15 +79,17 @@ QUESTION: {question}"""
 
 
 HINT_TEMPLATE = """Hint: The relevant time range is [{gt_start:.3f}, {gt_end:.3f}].
-Do not mention this hint in your reasoning. Continue the trajectory and reach a final <answer>.
+You must call the tool to crop this exact range before continuing. Do not mention this hint in your reasoning.
+Continue the trajectory and reach a final <answer>.
 """
 
 FINE_INSPECTION_TEMPLATE = """You are now in Phase 2 (fine-grained inspection), round {round_idx}.
 
 Continue the existing response without repeating earlier content. First append exactly one <think> block,
 then decide whether to output a <tool_call> or a final <answer>. Use 3–6 sentences in <think> with evidence,
-integration, and reflection. Mention time anchors in natural language. If evidence is sufficient, output
-<answer> and stop; otherwise output exactly one <tool_call> and stop.
+integration, and reflection. Mention time anchors in natural language. If evidence is sufficient, output a
+complete <answer>...</answer> block (with both opening and closing tags) and stop; otherwise output exactly
+one <tool_call>...</tool_call> block and stop.
 
 This round includes:
 - Attached frames: images from the video segment of this interval (low resolution, ~224px).
