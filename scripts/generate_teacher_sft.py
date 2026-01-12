@@ -33,7 +33,7 @@ import mimetypes
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from openai import OpenAI
@@ -79,12 +79,27 @@ Output format:
 <answer>YOUR_FINAL_ANSWER</answer>
 """
 
+TRAJECTORY_SYSTEM_PROMPT = """You are a helpful assistant.
+# Tools
+You may call one or more functions to assist with the user query.
+You are provided with function signatures within <tools></tools> XML tags:
+<tools>{"type": "function", "function": {"name": "crop_video", "description": "Crop a video to a specified duration.", "parameters": {"type": "object", "properties": {"video_path": {"type": "string", "description": "Path to the video file", "enum": null}, "start_time": {"type": "number", "description": "Start time in seconds", "enum": null}, "end_time": {"type": "number", "description": "End time in seconds, must be > start_time", "enum": null}}, "required": []}, "strict": false}}
+{"type": "function", "function": {"name": "get_frame", "description": "Extract a single frame from a video at a specified timestamp.", "parameters": {"type": "object", "properties": {"video_path": {"type": "string", "description": "Path to the video file", "enum": null}, "timestamp": {"type": "number", "description": "Timestamp in seconds for the desired frame", "enum": null}}, "required": []}, "strict": false}}</tools>
+For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+<tool_call>{"name": <function-name>, "arguments": <args-json-object>}</tool_call>"""
+
 TOOL_RESPONSE_OK = "The tool executed successfully."
 
 _FRAME_CACHE: Dict[str, Tuple[List[Dict[str, Any]], int]] = {}
 
 
 USER_TEMPLATE = """QUESTION: {question}"""
+
+TRAJECTORY_USER_TEMPLATE = (
+    "{question} Think first, call **crop_video** or **get_frame** if needed, then answer. "
+    "Format strictly as:  <think>...</think>  <tool_call>...</tool_call> "
+    "(if tools needed)  <answer>...</answer>. The Video path for this video is: {video_path}"
+)
 
 
 FINE_INSPECTION_TEMPLATE = """You are now in Phase 2 (fine-grained inspection), round {round_idx}.
@@ -176,6 +191,14 @@ def read_input(path: str) -> Iterable[Dict[str, Any]]:
     yield from read_jsonl(path)
 
 
+def render_system_prompt(prompt: str, **kwargs: Any) -> str:
+    rendered = prompt
+    for key, value in kwargs.items():
+        rendered = rendered.replace(f"{{{key}}}", str(value))
+        rendered = rendered.replace(f"{{{key}:.3f}}", str(value))
+    return rendered
+
+
 def load_existing_ids(path: str) -> set[str]:
     if not os.path.exists(path):
         return set()
@@ -258,6 +281,7 @@ def _get_cached_frames(
     config: GenerationConfig,
     clip_id: str,
 ) -> Tuple[List[Dict[str, Any]], List[str], int]:
+    print(f"[INFO] encode frames start clip_id={clip_id} video_path={video_path}", flush=True)
     cached = _FRAME_CACHE.get(video_path)
     if cached:
         frame_contents, total_bytes = cached
@@ -279,16 +303,22 @@ def build_messages(
     sample: Dict[str, Any],
     config: GenerationConfig,
 ) -> Tuple[List[Dict[str, Any]], List[str], int, str]:
+    print(
+        "[INFO] build_messages start clip_id="
+        f"{sample.get('clip_id')} video_path={sample.get('video_path')}",
+        flush=True,
+    )
     qa_start = float(sample.get("qa_start_time", sample.get("clip_start_time", 0.0)))
     qa_end = float(sample.get("qa_end_time", sample.get("clip_end_time", 0.0)))
     gt_answer = sample.get("answer")
     user_text = USER_TEMPLATE.format(
         question=sample["question"],
     )
-    system_prompt = SYSTEM_PROMPT.format(
+    system_prompt = render_system_prompt(
+        SYSTEM_PROMPT,
         video_path=sample["video_path"],
-        gt_start=qa_start,
-        gt_end=qa_end,
+        gt_start=f"{qa_start:.3f}",
+        gt_end=f"{qa_end:.3f}",
         gt_answer=gt_answer,
     )
     frame_contents, frame_paths, total_bytes = _get_cached_frames(
@@ -603,18 +633,11 @@ def build_longvt_output(
     frame_paths: List[str],
     frame_bytes: int,
 ) -> Dict[str, Any]:
-    qa_start = float(sample.get("qa_start_time", sample.get("clip_start_time", 0.0)))
-    qa_end = float(sample.get("qa_end_time", sample.get("clip_end_time", 0.0)))
-    gt_answer = sample.get("answer")
-    user_text = USER_TEMPLATE.format(
+    user_text = TRAJECTORY_USER_TEMPLATE.format(
         question=sample["question"],
-    )
-    system_prompt = SYSTEM_PROMPT.format(
         video_path=sample["video_path"],
-        gt_start=qa_start,
-        gt_end=qa_end,
-        gt_answer=gt_answer,
     )
+    system_prompt = TRAJECTORY_SYSTEM_PROMPT
     messages: List[Dict[str, Any]] = [
         {
             "role": "system",
@@ -791,11 +814,14 @@ def generate_sample(sample: Dict[str, Any], config: GenerationConfig) -> Dict[st
 
 def worker(entry: Dict[str, Any], config_dict: Dict[str, Any]) -> Dict[str, Any]:
     config = GenerationConfig(**config_dict)
+    clip_id = entry.get("clip_id")
+    video_path = entry.get("video_path")
+    print(f"[INFO] worker start clip_id={clip_id} video_path={video_path}", flush=True)
     try:
         return generate_sample(entry, config)
     except Exception as exc:
         return {
-            "clip_id": entry.get("clip_id"),
+            "clip_id": clip_id,
             "error": str(exc),
         }
 
@@ -836,6 +862,12 @@ def parse_args() -> argparse.Namespace:
         help="Disable preloading base64 frames before generation.",
     )
     parser.set_defaults(preload_frames=False)
+    parser.add_argument(
+        "--executor",
+        choices=("process", "thread", "inline"),
+        default="process",
+        help="Execution backend for workers.",
+    )
     return parser.parse_args()
 
 
@@ -876,14 +908,10 @@ def main() -> None:
 
     with open(args.output, "a", encoding="utf-8") as out_f:
         with tqdm(total=len(entries), desc="Generating") as progress:
-            with ProcessPoolExecutor(max_workers=args.workers) as executor:
-                futures = [
-                    executor.submit(worker, entry, config.__dict__)
-                    for entry in entries
-                ]
+            if args.executor == "inline":
                 first_checked = False
-                for future in as_completed(futures):
-                    result = future.result()
+                for entry in entries:
+                    result = worker(entry, config.__dict__)
                     if validate_first and not first_checked:
                         transcript = result.get("metadata", {}).get("transcript", "")
                         if transcript and not _validate_response(transcript):
@@ -896,6 +924,33 @@ def main() -> None:
                     out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
                     out_f.flush()
                     progress.update(1)
+            else:
+                executor_cls = ProcessPoolExecutor
+                if args.executor == "thread":
+                    executor_cls = ThreadPoolExecutor
+                with executor_cls(max_workers=args.workers) as executor:
+                    futures = [
+                        executor.submit(worker, entry, config.__dict__)
+                        for entry in entries
+                    ]
+                    first_checked = False
+                    for future in as_completed(futures):
+                        result = future.result()
+                        if validate_first and not first_checked:
+                            transcript = result.get("metadata", {}).get("transcript", "")
+                            if transcript and not _validate_response(transcript):
+                                result["error"] = "invalid first trajectory format"
+                                out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
+                                out_f.flush()
+                                print(
+                                    "[ERROR] First trajectory failed validation; aborting.",
+                                    file=sys.stderr,
+                                )
+                                return
+                            first_checked = True
+                        out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
+                        out_f.flush()
+                        progress.update(1)
 
 
 if __name__ == "__main__":
