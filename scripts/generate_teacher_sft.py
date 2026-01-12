@@ -972,8 +972,12 @@ def main() -> None:
                             result["error"] = "invalid first trajectory format"
                             out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
                             out_f.flush()
-                            print("[ERROR] First trajectory failed validation; aborting.", file=sys.stderr)
-                            return
+                            print(
+                                "[WARN] First trajectory failed validation; continuing.",
+                                file=sys.stderr,
+                            )
+                            first_checked = True
+                            continue
                         first_checked = True
                     out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
                     out_f.flush()
@@ -997,10 +1001,11 @@ def main() -> None:
                                 out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
                                 out_f.flush()
                                 print(
-                                    "[ERROR] First trajectory failed validation; aborting.",
+                                    "[WARN] First trajectory failed validation; continuing.",
                                     file=sys.stderr,
                                 )
-                                return
+                                first_checked = True
+                                continue
                             first_checked = True
                         out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
                         out_f.flush()
