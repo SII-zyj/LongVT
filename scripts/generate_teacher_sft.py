@@ -2,19 +2,24 @@
 """
 Generate teacher trajectories with rejection sampling for temporal grounding.
 
-Features:
-- OpenAI-compatible API via openai library
-- Multi-process generation
-- Resume from existing output
-- Streaming writes with progress bar
+Changes (per request):
+- Model output format:
+    ###Thinking
+    ...thinking text...
+    <tool_call>...</tool_call>   (if needed)
+    ###Answer
+    ...answer text...
 
-Example:
-  python scripts/generate_teacher_sft.py \
-    --input /path/to/input.jsonl \
-    --output /path/to/output.jsonl \
-    --model gemini-2.5-flash \
-    --api-base http://localhost:8000/v1 \
-    --api-key EMPTY
+  (Tool call tag stays as <tool_call>...</tool_call>.)
+
+- We parse/extract thinking + answer from the model output, then manually stitch to:
+    <think>...</think>
+    <tool_call>...</tool_call>   (if needed)
+    <answer>...</answer>
+
+- Validation is updated accordingly:
+  * Validate raw model output uses ###Thinking/###Answer (and NOT <think>/<answer>).
+  * The stored trajectory transcript/messages contain <think>/<answer> (stitched by us).
 """
 
 from __future__ import annotations
@@ -40,6 +45,10 @@ from openai import OpenAI
 from tqdm import tqdm
 
 
+# =========================
+# Prompt (MODEL RAW OUTPUT: ###Thinking / ###Answer)
+# =========================
+
 SYSTEM_PROMPT = """You are a helpful assistant for long-video understanding and reasoning.
 
 You may call tools to inspect video segments. Use the tool only when necessary.
@@ -60,25 +69,32 @@ GROUND_TRUTH_TIME: [{gt_start:.3f}, {gt_end:.3f}]
 GROUND_TRUTH_ANSWER: {gt_answer}
 
 Thinking requirements:
-- Each <think> must be non-empty prose (3–6 sentences) with clear evidence and integration.
+- The ###Thinking section must be non-empty prose (3–6 sentences) with clear evidence and integration.
 - Mention time anchors in natural language when you refer to video evidence.
 - Use plain ASCII punctuation; avoid placeholders, blank/placeholder/gibberish content, and non-ASCII symbols.
 
 We will follow a coarse-to-fine multi-stage approach:
-Phase 1 (global skim & planning — first <think> block):
+Phase 1 (global skim & planning — first ###Thinking section):
 - Reconstruct the visual storyline of the entire video by interpreting the sequence of provided frames (silent video). Do not mention that you are looking at static images or frames; narrate it as a continuous video scene.
 - In ≈ 4–6 flowing sentences, narrate what the camera shows across the whole video (settings, actors, transitions).
 - Timestamp during thinking: As you narrate, sprinkle human-readable time anchors for key moments (not only the final windows). Allowed styles include: ≈297s, around 298–300s, from 4:56 to 5:15, 295–300s, or [296.34s – 320.76s].
 
 First-turn decision rule:
-- Place all reasoning inside a single <think>...</think> section, and do not repeat <think> tags in the same turn.
-- Think first. If you need to call a tool, output exactly one <tool_call> and stop.
-- If you already have enough evidence to answer, output a single answer (no explanations) and stop.
+- Put all reasoning inside a single section that starts with a line "###Thinking".
+- If you need to call a tool, output exactly one <tool_call>...</tool_call> and stop (do NOT output ###Answer in that case).
+- If you already have enough evidence to answer, output a single section that starts with a line "###Answer" and stop (do NOT output <tool_call> in that case).
 
-Output format:
-<think>...</think>
-<tool_call>...</tool_call>
-<answer>YOUR_FINAL_ANSWER</answer>
+Output format (exactly one of the two):
+(1) If tool needed:
+###Thinking
+...thinking...
+<tool_call> ... </tool_call>
+
+(2) If answering now:
+###Thinking
+...thinking...
+###Answer
+...final answer...
 """
 
 TRAJECTORY_SYSTEM_PROMPT = """You are a helpful assistant.
@@ -94,65 +110,37 @@ TOOL_RESPONSE_OK = "The tool executed successfully."
 
 _FRAME_CACHE: Dict[str, Tuple[List[Dict[str, Any]], int, str]] = {}
 
-
 USER_TEMPLATE = """QUESTION: {question}"""
 
+# Final dataset (LongVT-style) still uses <think>/<answer> tags (we stitch them manually)
 TRAJECTORY_USER_TEMPLATE = (
     "{question} Think first, call **crop_video** or **get_frame** if needed, then answer. "
     "Format strictly as:  <think>...</think>  <tool_call>...</tool_call> "
     "(if tools needed)  <answer>...</answer>. The Video path for this video is: {video_path}"
 )
 
-
 FINE_INSPECTION_TEMPLATE = """You are now in Phase 2 (fine-grained inspection), round {round_idx}.
 
-Continue the existing response without repeating earlier content. First append a <think>...</think> block
-containing your reasoning, and do not repeat <think> tags in the same turn,
-then decide whether to output a <tool_call> or a final <answer>. Use 3–6 sentences in <think> with evidence,
-integration, and reflection. Mention time anchors in natural language. If evidence is sufficient, output a
-complete <answer>...</answer> block (with both opening and closing tags) and stop; otherwise output exactly
-one <tool_call>...</tool_call> block and stop. If you still cannot answer after a crop, keep calling the tool
-with new segments until you can answer.
-Output format example:
-<think>...</think>
-<tool_call>...</tool_call>
-<answer>YOUR_FINAL_ANSWER</answer>
+Continue the existing response without repeating earlier content.
+First output a section that starts with a line "###Thinking" containing your reasoning (3–6 sentences) with evidence,
+integration, and reflection. Mention time anchors in natural language.
+Then decide whether to output a <tool_call>...</tool_call> or a section that starts with a line "###Answer".
+If evidence is sufficient, output:
+###Answer
+...final answer...
+and stop; otherwise output exactly one <tool_call>...</tool_call> block and stop.
 
 This round includes:
 - Attached frames: images from the video segment of this interval (low resolution, ~224px).
 - The original QUESTION (for reference): {question}
 - Hint (ground-truth time range): [{gt_start:.3f}, {gt_end:.3f}]
 
-In the <think> block you append this round, avoid blank/placeholder/gibberish content and non-ASCII symbols.
+In the ###Thinking section you append this round, avoid blank/placeholder/gibberish content and non-ASCII symbols.
 Then include three parts (as prose, not bullet labels):
 1) Evidence: what this window shows that helps answer the question.
 2) Integration: how this confirms or revises your earlier hypothesis (mark outdated bits as "revised: …").
 3) Self-reflection: whether this window was mis-localized; if so, how you would correct it; otherwise note
    that it suffices for its subgoal.
-"""
-
-JUDGE_PROMPT_GROUNDING = """You are a strict judge for temporal grounding.
-
-Question:
-{question}
-
-Ground truth time range: [{gt_start:.3f}, {gt_end:.3f}]
-Predicted time range: [{pred_start:.3f}, {pred_end:.3f}]
-
-Decide if the predicted time range correctly answers the question.
-Respond with only one token: YES or NO.
-"""
-
-JUDGE_PROMPT_VQA = """You are a strict judge for VQA.
-
-Question:
-{question}
-
-Ground truth answer: {gt_answer}
-Predicted answer: {pred_answer}
-
-Decide if the predicted answer is semantically consistent with the ground truth.
-Respond with only one token: YES or NO.
 """
 
 
@@ -203,8 +191,13 @@ def read_input(path: str) -> Iterable[Dict[str, Any]]:
 def render_system_prompt(prompt: str, **kwargs: Any) -> str:
     rendered = prompt
     for key, value in kwargs.items():
+        # {key:.3f}
+        if isinstance(value, (int, float)):
+            rendered = rendered.replace(f"{{{key}:.3f}}", f"{float(value):.3f}")
+        else:
+            rendered = rendered.replace(f"{{{key}:.3f}}", str(value))
+        # {key}
         rendered = rendered.replace(f"{{{key}}}", str(value))
-        rendered = rendered.replace(f"{{{key}:.3f}}", str(value))
     return rendered
 
 
@@ -233,7 +226,7 @@ def load_existing_ids(path: str) -> set[str]:
 
 def parse_tool_calls(text: str, tool_name: str) -> Optional[Dict[str, Any]]:
     tool_call_pattern = r"<tool_call>(.*?)</tool_call>"
-    tool_calls = re.findall(tool_call_pattern, text, re.DOTALL)
+    tool_calls = re.findall(tool_call_pattern, text, re.DOTALL | re.IGNORECASE)
     for tool_call in reversed(tool_calls):
         tool_call = tool_call.strip()
         try:
@@ -320,9 +313,7 @@ def build_messages(
     qa_start = float(sample.get("qa_start_time", sample.get("clip_start_time", 0.0)))
     qa_end = float(sample.get("qa_end_time", sample.get("clip_end_time", 0.0)))
     gt_answer = sample.get("answer")
-    user_text = USER_TEMPLATE.format(
-        question=sample["question"],
-    )
+    user_text = USER_TEMPLATE.format(question=sample["question"])
     frame_contents, frame_paths, total_bytes, frame_hint = _get_cached_frames(
         sample["video_path"],
         config,
@@ -331,8 +322,8 @@ def build_messages(
     system_prompt = render_system_prompt(
         SYSTEM_PROMPT,
         video_path=sample["video_path"],
-        gt_start=f"{qa_start:.3f}",
-        gt_end=f"{qa_end:.3f}",
+        gt_start=qa_start,
+        gt_end=qa_end,
         gt_answer=gt_answer,
         frame_hint=frame_hint,
     )
@@ -453,40 +444,196 @@ def encode_video_frames(
         current_max_frames = max(1, current_max_frames - reduction)
 
 
-def _validate_response(text: str) -> bool:
-    stripped = text.lstrip()
-    if not stripped.startswith("<think>"):
-        return False
-    think_blocks = re.findall(r"<think>.*?</think>", text, re.DOTALL)
-    if len(think_blocks) != 1:
-        return False
-    first_think_start = text.find("<think>")
-    first_think_end = text.find("</think>")
-    if first_think_start == -1 or first_think_end == -1:
-        return False
-    if first_think_end < first_think_start:
-        return False
-    tool_call_pattern = r"<tool_call>(.*?)</tool_call>"
-    tool_calls = re.findall(tool_call_pattern, text, re.DOTALL)
-    if not tool_calls:
-        answer_start = text.find("<answer>")
-        answer_end = text.find("</answer>")
-        return answer_start != -1 and answer_end != -1 and first_think_end < answer_start
-    for tool_call in tool_calls:
-        if first_think_end > text.find("<tool_call>"):
-            return False
-        tool_call = tool_call.strip()
+# =========================
+# Raw output parsing/validation (###Thinking / ###Answer)
+# =========================
+
+_THINK_HDR_LINE_RE = re.compile(r"^###\s*Thinking\b.*(?:\r?\n|$)", flags=re.IGNORECASE)
+_ANSWER_HDR_LINE_RE = re.compile(r"^###\s*Answer\b.*(?:\r?\n|$)", flags=re.IGNORECASE | re.MULTILINE)
+_TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>.*?</tool_call>", flags=re.IGNORECASE | re.DOTALL)
+
+
+def _parse_jsonish(s: str) -> Optional[Any]:
+    s = s.strip()
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
         try:
-            data = json.loads(tool_call)
-        except json.JSONDecodeError:
-            try:
-                data = ast.literal_eval(tool_call)
-            except (ValueError, SyntaxError):
-                return False
-        if not isinstance(data, dict) or "name" not in data or "arguments" not in data:
+            return ast.literal_eval(s)
+        except (ValueError, SyntaxError):
+            return None
+
+
+def _validate_tool_calls_in_text(text: str) -> bool:
+    for m in re.finditer(r"<tool_call>(.*?)</tool_call>", text, flags=re.I | re.S):
+        payload = (m.group(1) or "").strip()
+        data = _parse_jsonish(payload)
+        if not isinstance(data, dict):
+            return False
+        if "name" not in data or "arguments" not in data:
+            return False
+        if not isinstance(data.get("arguments"), dict):
             return False
     return True
 
+
+def _validate_raw_response(text: str) -> bool:
+    """
+    Validate MODEL RAW output:
+    - Must start with "###Thinking" (allow whitespace before it).
+    - Must contain exactly one ###Thinking header in this response.
+    - Must contain exactly one of:
+        * at least one <tool_call>...</tool_call> block (and NO ###Answer)
+        * a ###Answer header (and NO <tool_call> blocks)
+    - Tool call JSON must be parseable and contain {"name": ..., "arguments": {...}}.
+    """
+    raw = text or ""
+    stripped = raw.lstrip()
+
+    # Backward-compat (in case a model sometimes outputs legacy tags): accept it.
+    if stripped.lower().startswith("<think>"):
+        # minimal sanity: ensure one <think> in this response
+        think_blocks = re.findall(r"<think>.*?</think>", stripped, flags=re.I | re.S)
+        if len(think_blocks) != 1:
+            return False
+        tool_calls = re.findall(r"<tool_call>.*?</tool_call>", stripped, flags=re.I | re.S)
+        ans_blocks = re.findall(r"<answer>.*?</answer>", stripped, flags=re.I | re.S)
+        if tool_calls and ans_blocks:
+            return False
+        if not tool_calls and not ans_blocks:
+            return False
+        return _validate_tool_calls_in_text(stripped)
+
+    # New format: ###Thinking
+    m0 = _THINK_HDR_LINE_RE.match(stripped)
+    if not m0:
+        return False
+    # exactly one thinking header in this response
+    thinking_headers = re.findall(r"^###\s*Thinking\b", stripped, flags=re.I | re.M)
+    if len(thinking_headers) != 1:
+        return False
+
+    has_tool_call = bool(_TOOL_CALL_BLOCK_RE.search(stripped))
+    has_answer = bool(_ANSWER_HDR_LINE_RE.search(stripped, pos=m0.end()))
+
+    # Must have exactly one of tool_call or answer
+    if has_tool_call and has_answer:
+        return False
+    if not has_tool_call and not has_answer:
+        return False
+
+    # If answer: ensure appears AFTER thinking header end
+    if has_answer:
+        m_ans = _ANSWER_HDR_LINE_RE.search(stripped, pos=m0.end())
+        if not m_ans:
+            return False
+        # no tool calls allowed
+        if _TOOL_CALL_BLOCK_RE.search(stripped):
+            return False
+        # must have some answer text after header line
+        ans_text = stripped[m_ans.end():].strip()
+        if not ans_text:
+            return False
+        return True
+
+    # If tool_call: must appear AFTER thinking header end, and tool JSON must be valid
+    m_tool = _TOOL_CALL_BLOCK_RE.search(stripped)
+    if not m_tool:
+        return False
+    if m_tool.start() < m0.end():
+        return False
+    # no answer allowed
+    if _ANSWER_HDR_LINE_RE.search(stripped, pos=m0.end()):
+        return False
+    return _validate_tool_calls_in_text(stripped)
+
+
+def _normalize_model_output_to_canonical(text: str) -> Optional[str]:
+    """
+    Convert MODEL RAW output (###Thinking/###Answer) into canonical:
+        <think>...</think>
+        <tool_call>...</tool_call>   (if tool response)
+        <answer>...</answer>         (if answer response)
+
+    Returns canonical string, or None if parsing fails.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None
+
+    # If already canonical-ish (legacy model output), keep it.
+    if re.search(r"<think>.*?</think>", raw, flags=re.I | re.S):
+        return raw
+
+    s = raw.lstrip()
+    m_th = _THINK_HDR_LINE_RE.match(s)
+    if not m_th:
+        return None
+    think_body_start = m_th.end()
+
+    # Determine if tool_call or answer
+    m_tool = _TOOL_CALL_BLOCK_RE.search(s, pos=think_body_start)
+    m_ans = _ANSWER_HDR_LINE_RE.search(s, pos=think_body_start)
+
+    if m_tool and m_ans:
+        # should not happen after validation; treat as failure to be safe
+        return None
+
+    if m_tool:
+        think_text = s[think_body_start:m_tool.start()].strip()
+        if not think_text:
+            return None
+        tool_blocks = [m.group(0).strip() for m in _TOOL_CALL_BLOCK_RE.finditer(s, pos=m_tool.start())]
+        if not tool_blocks:
+            return None
+        # canonical
+        parts = [f"<think>{think_text}</think>"]
+        parts.extend(tool_blocks)
+        return "\n".join(parts).strip()
+
+    if m_ans:
+        think_text = s[think_body_start:m_ans.start()].strip()
+        if not think_text:
+            return None
+        answer_text = s[m_ans.end():].strip()
+        if not answer_text:
+            return None
+        parts = [
+            f"<think>{think_text}</think>",
+            f"<answer>{answer_text}</answer>",
+        ]
+        return "\n".join(parts).strip()
+
+    return None
+
+
+def _validate_first_turn_transcript_canonical(text: str) -> bool:
+    """
+    Validate the FIRST assistant turn in the stored transcript (canonical tags).
+    We only check the prefix (first think + exactly one of tool_call/answer).
+    """
+    t = (text or "").lstrip()
+    if not t.lower().startswith("<think>"):
+        return False
+    m_th = re.search(r"<think>.*?</think>", t, flags=re.I | re.S)
+    if not m_th:
+        return False
+    rest = t[m_th.end():]
+
+    m_tool = re.search(r"<tool_call>.*?</tool_call>", rest, flags=re.I | re.S)
+    m_ans = re.search(r"<answer>.*?</answer>", rest, flags=re.I | re.S)
+    if m_tool and m_ans:
+        return False
+    if not m_tool and not m_ans:
+        return False
+    if m_tool and not _validate_tool_calls_in_text(m_tool.group(0)):
+        return False
+    return True
+
+
+# =========================
+# Model call
+# =========================
 
 def call_model(client: OpenAI, config: GenerationConfig, messages: List[Dict[str, Any]]) -> str:
     delay_s = 1.0
@@ -499,11 +646,26 @@ def call_model(client: OpenAI, config: GenerationConfig, messages: List[Dict[str
                 max_tokens=config.max_tokens,
                 timeout=config.timeout_s,
             )
-            content = resp.choices[0].message.content or ""
-            print(f"[INFO] model response\n{content}", flush=True)
-            if _validate_response(content):
-                return content
-            print("[WARN] Invalid response format. Retrying...", file=sys.stderr)
+            raw_content = resp.choices[0].message.content or ""
+            print(f"[INFO] model raw response\n{raw_content}", flush=True)
+
+            if not _validate_raw_response(raw_content):
+                print("[WARN] Invalid RAW response format. Retrying...", file=sys.stderr)
+                raise ValueError("invalid_raw_format")
+
+            canonical = _normalize_model_output_to_canonical(raw_content)
+            if not canonical:
+                print("[WARN] Failed to normalize response to canonical. Retrying...", file=sys.stderr)
+                raise ValueError("normalize_failed")
+
+            # extra sanity
+            if not canonical.lstrip().lower().startswith("<think>"):
+                print("[WARN] Canonical response does not start with <think>. Retrying...", file=sys.stderr)
+                raise ValueError("canonical_invalid")
+
+            print(f"[INFO] model canonical response\n{canonical}", flush=True)
+            return canonical
+
         except Exception as exc:
             print(f"[WARN] API call failed: {exc}. Retrying in {delay_s:.1f}s...", file=sys.stderr)
             time.sleep(delay_s)
@@ -530,7 +692,7 @@ def run_mcp_tool(server_path: str, tool_name: str, tool_args: Dict[str, Any]):
 
 
 def _strip_tool_responses(text: str) -> str:
-    return re.sub(r"<tool_response>.*?</tool_response>", "", text, flags=re.DOTALL)
+    return re.sub(r"<tool_response>.*?</tool_response>", "", text, flags=re.DOTALL | re.IGNORECASE)
 
 
 def apply_tool_responses(
@@ -542,7 +704,7 @@ def apply_tool_responses(
     turn_idx: int,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     tool_call_pattern = r"(<tool_call>.*?</tool_call>)"
-    tool_calls = re.findall(tool_call_pattern, text, re.DOTALL)
+    tool_calls = re.findall(tool_call_pattern, text, re.DOTALL | re.IGNORECASE)
     if not tool_calls:
         return text, []
 
@@ -550,15 +712,10 @@ def apply_tool_responses(
     response_runs: List[Dict[str, Any]] = []
     for tool_call in tool_calls:
         tool_args = None
-        inner = re.search(r"<tool_call>(.*?)</tool_call>", tool_call, re.DOTALL)
+        inner = re.search(r"<tool_call>(.*?)</tool_call>", tool_call, re.DOTALL | re.IGNORECASE)
         if inner:
-            try:
-                tool_args = json.loads(inner.group(1).strip())
-            except json.JSONDecodeError:
-                try:
-                    tool_args = ast.literal_eval(inner.group(1).strip())
-                except (ValueError, SyntaxError):
-                    tool_args = None
+            tool_args = _parse_jsonish(inner.group(1).strip())
+
         tool_response_text = TOOL_RESPONSE_OK
         success = False
         image_count = 0
@@ -651,9 +808,7 @@ def _build_tool_response_content(
     *,
     encode_images: bool,
 ) -> List[Dict[str, Any]]:
-    response_text = "\n".join(
-        run.get("response_text", TOOL_RESPONSE_OK) for run in tool_runs
-    )
+    response_text = "\n".join(run.get("response_text", TOOL_RESPONSE_OK) for run in tool_runs)
     content: List[Dict[str, Any]] = [
         {"type": "text", "text": f"<tool_response>\n{response_text}"},
     ]
@@ -751,7 +906,7 @@ def generate_sample(sample: Dict[str, Any], config: GenerationConfig) -> Dict[st
     response_steps: List[Tuple[str, List[Dict[str, Any]]]] = []
 
     while True:
-        response = call_model(client, config, messages)
+        response = call_model(client, config, messages)  # canonical (<think>/<answer> stitched by us)
         transcript += response
 
         answer_interval = parse_answer_interval(transcript)
@@ -781,10 +936,7 @@ def generate_sample(sample: Dict[str, Any], config: GenerationConfig) -> Dict[st
         if tool_args:
             break
 
-        print(
-            "[WARN] Response missing <answer> and <tool_call>. Retrying...",
-            file=sys.stderr,
-        )
+        print("[WARN] Response missing <answer> and <tool_call>. Retrying...", file=sys.stderr)
         transcript = ""
 
     response_clean, response_tool_runs = apply_tool_responses(
@@ -798,8 +950,11 @@ def generate_sample(sample: Dict[str, Any], config: GenerationConfig) -> Dict[st
     response_steps.append((response_clean, response_tool_runs))
     transcript = response_clean
     _append_assistant(messages, response_clean)
+
+    # Remove frames for later rounds; keep only question text
     if len(messages) > 1 and isinstance(messages[1].get("content"), list):
         messages[1]["content"] = [{"type": "text", "text": user_text}]
+
     if response_tool_runs:
         _strip_previous_tool_responses(messages)
         messages.append(
@@ -819,7 +974,7 @@ def generate_sample(sample: Dict[str, Any], config: GenerationConfig) -> Dict[st
             gt_end=qa_end,
         )
         _append_user(messages, round_prompt)
-        response = call_model(client, config, messages)
+        response = call_model(client, config, messages)  # canonical
         response_clean, response_tool_runs = apply_tool_responses(
             response,
             "crop_video",
@@ -831,6 +986,7 @@ def generate_sample(sample: Dict[str, Any], config: GenerationConfig) -> Dict[st
         response_steps.append((response_clean, response_tool_runs))
         transcript += "\n" + response_clean
         _append_assistant(messages, response_clean)
+
         if response_tool_runs:
             _strip_previous_tool_responses(messages)
             messages.append(
@@ -971,14 +1127,11 @@ def main() -> None:
                     result = worker(entry, config.__dict__)
                     if validate_first and not first_checked:
                         transcript = result.get("metadata", {}).get("transcript", "")
-                        if transcript and not _validate_response(transcript):
-                            result["error"] = "invalid first trajectory format"
+                        if transcript and not _validate_first_turn_transcript_canonical(transcript):
+                            result["error"] = "invalid first trajectory format (canonical)"
                             out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
                             out_f.flush()
-                            print(
-                                "[WARN] First trajectory failed validation; continuing.",
-                                file=sys.stderr,
-                            )
+                            print("[WARN] First trajectory failed validation; continuing.", file=sys.stderr)
                             first_checked = True
                             continue
                         first_checked = True
@@ -990,23 +1143,17 @@ def main() -> None:
                 if args.executor == "thread":
                     executor_cls = ThreadPoolExecutor
                 with executor_cls(max_workers=args.workers) as executor:
-                    futures = [
-                        executor.submit(worker, entry, config.__dict__)
-                        for entry in entries
-                    ]
+                    futures = [executor.submit(worker, entry, config.__dict__) for entry in entries]
                     first_checked = False
                     for future in as_completed(futures):
                         result = future.result()
                         if validate_first and not first_checked:
                             transcript = result.get("metadata", {}).get("transcript", "")
-                            if transcript and not _validate_response(transcript):
-                                result["error"] = "invalid first trajectory format"
+                            if transcript and not _validate_first_turn_transcript_canonical(transcript):
+                                result["error"] = "invalid first trajectory format (canonical)"
                                 out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
                                 out_f.flush()
-                                print(
-                                    "[WARN] First trajectory failed validation; continuing.",
-                                    file=sys.stderr,
-                                )
+                                print("[WARN] First trajectory failed validation; continuing.", file=sys.stderr)
                                 first_checked = True
                                 continue
                             first_checked = True
