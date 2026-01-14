@@ -6,7 +6,7 @@ Usage:
   python examples/video_tools/test_get_frame.py \
     --video_path /path/to/video.mp4 \
     --timestamp 3.5 \
-    --output_path /tmp/frame.png
+    --output_dir /tmp/get_frame_frames
 """
 
 import argparse
@@ -18,7 +18,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 
-async def run_get_frame(server_path: str, video_path: str, timestamp: float, output_path: str) -> None:
+async def run_get_frame(server_path: str, video_path: str, timestamp: float, output_dir: str) -> None:
     server_params = StdioServerParameters(command="python", args=[server_path])
     async with stdio_client(server=server_params) as (read_stream, write_stream):
         async with ClientSession(read_stream, write_stream) as session:
@@ -33,11 +33,14 @@ async def run_get_frame(server_path: str, video_path: str, timestamp: float, out
             raise RuntimeError(f"get_frame tool returned no image content: {error_text}")
         raise RuntimeError("No image content returned from get_frame tool.")
 
-    image_data = base64.b64decode(image_parts[0].data)
-    with open(output_path, "wb") as f:
-        f.write(image_data)
+    os.makedirs(output_dir, exist_ok=True)
+    for index, image_part in enumerate(image_parts):
+        image_data = base64.b64decode(image_part.data)
+        output_path = os.path.join(output_dir, f"frame_{index + 1}.png")
+        with open(output_path, "wb") as f:
+            f.write(image_data)
 
-    print(f"Saved frame to {output_path}")
+        print(f"Saved frame {index + 1} to {output_path}")
 
 
 def main() -> None:
@@ -50,16 +53,16 @@ def main() -> None:
         help="Path to the MCP server script.",
     )
     parser.add_argument(
-        "--output_path",
-        default="get_frame_output.png",
-        help="Where to save the extracted frame.",
+        "--output_dir",
+        default="get_frame_outputs",
+        help="Directory to save the extracted frames.",
     )
     args = parser.parse_args()
 
     if not os.path.isfile(args.video_path):
         raise FileNotFoundError(f"Video path is not a file: {args.video_path}")
 
-    asyncio.run(run_get_frame(args.server_path, args.video_path, args.timestamp, args.output_path))
+    asyncio.run(run_get_frame(args.server_path, args.video_path, args.timestamp, args.output_dir))
 
 
 if __name__ == "__main__":

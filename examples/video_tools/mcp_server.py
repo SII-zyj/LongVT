@@ -142,16 +142,16 @@ def crop_video(
 def get_frame(
     video_path: Annotated[str, Field(description="Path to the video file")] = None,
     timestamp: Annotated[float, Field(description="Timestamp in seconds for the desired frame")] = None,
-) -> ImageContent:
+) -> list[ImageContent]:
     """
-    Extract a single frame from a video at a specified timestamp.
+    Extract the three frames closest to a timestamp from a video.
 
     Args:
         video_path (str): Path to the video file.
         timestamp (float): Timestamp in seconds for the desired frame.
 
     Returns:
-        ImageContent: The extracted frame as a base64-encoded PNG.
+        list[ImageContent]: The extracted frames as base64-encoded PNGs.
     """
     logger.info(f"Validating parameters: video_path={video_path}, timestamp={timestamp}")
 
@@ -190,20 +190,40 @@ def get_frame(
         cap.release()
         raise ValueError(f"timestamp ({timestamp}s) exceeds video duration ({duration:.2f}s)")
 
-    cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
-    success, frame = cap.read()
+    max_index = int(frame_count) - 1
+    target_index = int(round(timestamp * fps))
+    target_index = max(0, min(target_index, max_index))
+
+    selected_indices: list[int] = [target_index]
+    offset = 1
+    while len(selected_indices) < 3 and offset <= max_index:
+        for sign in (-1, 1):
+            candidate = target_index + sign * offset
+            if 0 <= candidate <= max_index and candidate not in selected_indices:
+                selected_indices.append(candidate)
+                if len(selected_indices) == 3:
+                    break
+        offset += 1
+
+    selected_indices = sorted(selected_indices)
+    image_contents: list[ImageContent] = []
+    for frame_index in selected_indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        success, frame = cap.read()
+        if not success:
+            cap.release()
+            raise RuntimeError(f"Failed to read frame index {frame_index} from {video_path}")
+
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        image = Image.fromarray(frame_rgb)
+        output_buffer = BytesIO()
+        image.save(output_buffer, format="PNG")
+        byte_data = output_buffer.getvalue()
+        base64_str = base64.b64encode(byte_data).decode("utf-8")
+        image_contents.append(ImageContent(type="image", data=base64_str, mimeType="image/png"))
+
     cap.release()
-
-    if not success:
-        raise RuntimeError(f"Failed to read frame at {timestamp}s from {video_path}")
-
-    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    image = Image.fromarray(frame_rgb)
-    output_buffer = BytesIO()
-    image.save(output_buffer, format="PNG")
-    byte_data = output_buffer.getvalue()
-    base64_str = base64.b64encode(byte_data).decode("utf-8")
-    return ImageContent(type="image", data=base64_str, mimeType="image/png")
+    return image_contents
 
 
 # video_zoom_in_tool
