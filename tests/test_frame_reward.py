@@ -21,7 +21,7 @@ def run_frame_reward(predict_str: str, extra_info: dict, window: float = 1.0) ->
         "answer": "dummy answer",
     }
     full_extra_info.update(extra_info)
-    score, acc_reward, format_reward, frame_reward = vl_agent.compute_score(
+    score, acc_reward, format_reward, frame_reward, *_ = vl_agent.compute_score(
         predict_str=predict_str,
         ground_truth="dummy",
         extra_info=full_extra_info,

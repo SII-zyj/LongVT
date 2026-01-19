@@ -100,6 +100,17 @@ class AlgoConfig(BaseConfig):
         "use_kl_in_reward",
         "kl_penalty",
         "use_pf_ppo",
+        "use_grpo_fidelity",
+        "grpo_fidelity_key",
+        "grpo_fidelity_hgood",
+        "grpo_fidelity_hbad",
+        "grpo_fidelity_hgood_neg",
+        "grpo_fidelity_hbad_neg",
+        "grpo_fidelity_use_std",
+        "grpo_fidelity_mode",
+        "grpo_fidelity_alpha",
+        "grpo_fidelity_clip",
+        "grpo_fidelity_min_scale",
     ]
 
     gamma: float = 1.0
@@ -112,3 +123,14 @@ class AlgoConfig(BaseConfig):
     use_pf_ppo: bool = False
     pf_ppo: Optional[PFPPOConfig] = None
     filter_groups: Optional[FilterGroupsConfig] = None
+    use_grpo_fidelity: bool = False
+    grpo_fidelity_key: Optional[str] = None
+    grpo_fidelity_hgood: float = 1.2
+    grpo_fidelity_hbad: float = 0.8
+    grpo_fidelity_hgood_neg: Optional[float] = None
+    grpo_fidelity_hbad_neg: Optional[float] = None
+    grpo_fidelity_use_std: bool = False
+    grpo_fidelity_mode: str = "binary"
+    grpo_fidelity_alpha: float = 0.2
+    grpo_fidelity_clip: float = 1.0
+    grpo_fidelity_min_scale: float = 0.1

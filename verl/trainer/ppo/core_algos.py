@@ -249,6 +249,16 @@ def compute_grpo_outcome_advantage(
     index: np.ndarray,
     epsilon: float = 1e-6,
     norm_adv_by_std_in_grpo: bool = True,
+    fidelity_scores: Optional[torch.Tensor] = None,
+    visual_rationale_mask: Optional[torch.Tensor] = None,
+    fidelity_good_scale: float = 1.2,
+    fidelity_bad_scale: float = 0.8,
+    fidelity_good_scale_neg: Optional[float] = None,
+    fidelity_bad_scale_neg: Optional[float] = None,
+    fidelity_mode: str = "binary",
+    fidelity_alpha: float = 0.2,
+    fidelity_clip: float = 1.0,
+    fidelity_min_scale: float = 0.1,
     config: Optional[AlgoConfig] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -266,6 +276,26 @@ def compute_grpo_outcome_advantage(
             small value to avoid division by zero
         norm_adv_by_std_in_grpo: `(bool)`
             whether to scale the GRPO advantage
+        fidelity_scores: `(Optional[torch.Tensor])`
+            Optional per-sample fidelity scores for visual rationales.
+        visual_rationale_mask: `(Optional[torch.Tensor])`
+            Optional boolean mask indicating which samples contain visual rationales.
+        fidelity_good_scale: `(float)`
+            Advantage scale factor for good visual rationales in advantageous trajectories.
+        fidelity_bad_scale: `(float)`
+            Advantage scale factor for bad visual rationales in advantageous trajectories.
+        fidelity_good_scale_neg: `(Optional[float])`
+            Advantage scale factor for good visual rationales in disadvantageous trajectories.
+        fidelity_bad_scale_neg: `(Optional[float])`
+            Advantage scale factor for bad visual rationales in disadvantageous trajectories.
+        fidelity_mode: `(str)`
+            Fidelity modulation mode: "binary" uses good/bad thresholds, "continuous" uses signed scaling.
+        fidelity_alpha: `(float)`
+            Signed scaling factor for continuous fidelity modulation.
+        fidelity_clip: `(float)`
+            Absolute clip value for continuous fidelity scores before scaling.
+        fidelity_min_scale: `(float)`
+            Minimum scaling factor to avoid flipping advantage signs.
         config: `(Optional[AlgoConfig])`
             algorithm configuration object
 
@@ -303,6 +333,35 @@ def compute_grpo_outcome_advantage(
                 scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
             else:
                 scores[i] = scores[i] - id2mean[index[i]]
+
+        if fidelity_scores is not None:
+            fidelity_scores = fidelity_scores.to(scores.device)
+            if visual_rationale_mask is None:
+                visual_rationale_mask = torch.ones_like(fidelity_scores, dtype=torch.bool)
+            else:
+                visual_rationale_mask = visual_rationale_mask.to(dtype=torch.bool, device=scores.device)
+
+            pos_adv_mask = scores >= 0
+            neg_adv_mask = ~pos_adv_mask
+            scales = torch.ones_like(scores)
+            if fidelity_mode == "continuous":
+                fidelity_clamped = torch.clamp(fidelity_scores, -fidelity_clip, fidelity_clip)
+                scale_pos = 1.0 + fidelity_alpha * fidelity_clamped
+                scale_neg = 1.0 - fidelity_alpha * fidelity_clamped
+                scale_pos = torch.clamp(scale_pos, min=fidelity_min_scale)
+                scale_neg = torch.clamp(scale_neg, min=fidelity_min_scale)
+                scales[visual_rationale_mask & pos_adv_mask] = scale_pos[visual_rationale_mask & pos_adv_mask]
+                scales[visual_rationale_mask & neg_adv_mask] = scale_neg[visual_rationale_mask & neg_adv_mask]
+            else:
+                good_mask = fidelity_scores > 0
+                bad_mask = ~good_mask
+                good_scale_neg = fidelity_good_scale_neg if fidelity_good_scale_neg is not None else fidelity_bad_scale
+                bad_scale_neg = fidelity_bad_scale_neg if fidelity_bad_scale_neg is not None else fidelity_good_scale
+                scales[visual_rationale_mask & pos_adv_mask & good_mask] = fidelity_good_scale
+                scales[visual_rationale_mask & pos_adv_mask & bad_mask] = fidelity_bad_scale
+                scales[visual_rationale_mask & neg_adv_mask & good_mask] = good_scale_neg
+                scales[visual_rationale_mask & neg_adv_mask & bad_mask] = bad_scale_neg
+            scores = scores * scales
         scores = scores.unsqueeze(-1) * response_mask
 
     return scores, scores
