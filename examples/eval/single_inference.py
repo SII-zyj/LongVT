@@ -92,7 +92,7 @@ def crop_video_local(video_path: str, start_time: float, end_time: float) -> lis
 
 def get_frame_local(video_path: str, timestamp: float) -> list:
     """
-    Extract a single frame and return it as a base64 encoded image.
+    Extract the three frames closest to a timestamp and return them as base64 encoded images.
     Mirrors the behavior of MCP server's get_frame tool.
     """
     import cv2
@@ -113,19 +113,39 @@ def get_frame_local(video_path: str, timestamp: float) -> list:
         cap.release()
         raise ValueError(f"timestamp ({timestamp}s) exceeds video duration ({duration:.2f}s)")
 
-    cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
-    success, frame = cap.read()
+    max_index = int(frame_count) - 1
+    target_index = int(round(timestamp * fps))
+    target_index = max(0, min(target_index, max_index))
+
+    selected_indices: list[int] = [target_index]
+    offset = 1
+    while len(selected_indices) < 3 and offset <= max_index:
+        for sign in (-1, 1):
+            candidate = target_index + sign * offset
+            if 0 <= candidate <= max_index and candidate not in selected_indices:
+                selected_indices.append(candidate)
+                if len(selected_indices) == 3:
+                    break
+        offset += 1
+
+    selected_indices = sorted(selected_indices)
+    image_contents = []
+    for frame_index in selected_indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+        success, frame = cap.read()
+        if not success:
+            cap.release()
+            raise RuntimeError(f"Failed to read frame index {frame_index} from {video_path}")
+
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        image = Image.fromarray(frame_rgb)
+        buf = BytesIO()
+        image.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        image_contents.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
+
     cap.release()
-
-    if not success:
-        raise RuntimeError(f"Failed to read frame at {timestamp}s from {video_path}")
-
-    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    image = Image.fromarray(frame_rgb)
-    buf = BytesIO()
-    image.save(buf, format="PNG")
-    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-    return [{"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}]
+    return image_contents
 
 
 # ============== Tool Schema ==============
