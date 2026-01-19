@@ -262,12 +262,54 @@ def compute_advantage(
     elif adv_estimator == AdvantageEstimator.GRPO:
         # Initialize the mask for GRPO calculation
         grpo_calculation_mask = data.batch["response_mask"]
+        fidelity_scores = None
+        visual_rationale_mask = None
+        if config is not None and config.get("use_grpo_fidelity", False):
+            fidelity_key = config.get("grpo_fidelity_key")
+            if fidelity_key and fidelity_key in data.non_tensor_batch:
+                fidelity_scores = data.non_tensor_batch[fidelity_key]
+            elif "time_reward_score" in data.non_tensor_batch:
+                fidelity_scores = data.non_tensor_batch["time_reward_score"]
+            elif "frame_reward_score" in data.non_tensor_batch:
+                fidelity_scores = data.non_tensor_batch["frame_reward_score"]
+
+            if fidelity_scores is not None:
+                fidelity_scores = torch.tensor(
+                    fidelity_scores,
+                    dtype=torch.float32,
+                    device=data.batch["token_level_rewards"].device,
+                )
+                if "visual_rationale_used" in data.non_tensor_batch:
+                    visual_rationale_mask = torch.tensor(
+                        data.non_tensor_batch["visual_rationale_used"],
+                        dtype=torch.bool,
+                        device=data.batch["token_level_rewards"].device,
+                    )
+                valid_mask = fidelity_scores >= 0
+                fidelity_scores = torch.where(valid_mask, fidelity_scores, torch.zeros_like(fidelity_scores))
+                if visual_rationale_mask is None:
+                    visual_rationale_mask = valid_mask
+                else:
+                    visual_rationale_mask = visual_rationale_mask & valid_mask
+            if not config.get("grpo_fidelity_use_std", False):
+                norm_adv_by_std_in_grpo = False
         # Call compute_grpo_outcome_advantage with parameters matching its definition
         advantages, returns = core_algos.compute_grpo_outcome_advantage(
             token_level_rewards=data.batch["token_level_rewards"],
             response_mask=grpo_calculation_mask,
             index=data.non_tensor_batch["uid"],
             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+            fidelity_scores=fidelity_scores,
+            visual_rationale_mask=visual_rationale_mask,
+            fidelity_good_scale=config.get("grpo_fidelity_hgood", 1.2) if config is not None else 1.2,
+            fidelity_bad_scale=config.get("grpo_fidelity_hbad", 0.8) if config is not None else 0.8,
+            fidelity_good_scale_neg=config.get("grpo_fidelity_hgood_neg") if config is not None else None,
+            fidelity_bad_scale_neg=config.get("grpo_fidelity_hbad_neg") if config is not None else None,
+            fidelity_mode=config.get("grpo_fidelity_mode", "binary") if config is not None else "binary",
+            fidelity_alpha=config.get("grpo_fidelity_alpha", 0.2) if config is not None else 0.2,
+            fidelity_clip=config.get("grpo_fidelity_clip", 1.0) if config is not None else 1.0,
+            fidelity_min_scale=config.get("grpo_fidelity_min_scale", 0.1) if config is not None else 0.1,
+            config=config,
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns

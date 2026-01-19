@@ -166,10 +166,26 @@ def compute_score(
 
         if kwargs.get("tool_use_reward", False) and extra:
             score_dict["tool_reward_score"] = extra[0]
-        elif (kwargs.get("use_time_reward", False) or kwargs.get("use_iou_reward", False)) and extra:
-            score_dict["time_reward_score"] = extra[0]
-        elif kwargs.get("use_frame_reward", False) and extra:
-            score_dict["frame_reward_score"] = extra[0]
+        elif (kwargs.get("use_time_reward", False) or kwargs.get("use_iou_reward", False) or kwargs.get(
+            "use_frame_reward", False
+        )) and extra:
+            evidence_reward = extra[0]
+            score_dict["evidence_reward_score"] = evidence_reward
+            if kwargs.get("use_time_reward", False) or kwargs.get("use_iou_reward", False):
+                score_dict["time_reward_score"] = evidence_reward
+            if kwargs.get("use_frame_reward", False):
+                score_dict["frame_reward_score"] = evidence_reward
+            if len(extra) > 1:
+                score_dict["crop_reward_score"] = extra[1]
+            if len(extra) > 2:
+                score_dict["frame_reward_component_score"] = extra[2]
+        if kwargs.get("use_time_reward", False) or kwargs.get("use_iou_reward", False) or kwargs.get(
+            "use_frame_reward", False
+        ):
+            visual_rationale_used = bool(
+                re.search(r"<tool_call>.*?(crop_video|get_frame).*?</tool_call>", solution_str, re.DOTALL)
+            )
+            score_dict["visual_rationale_used"] = float(visual_rationale_used)
     elif data_source in ["thinklite_eureka", "xince"]:
         from custom_rewards import vl_agent
 
