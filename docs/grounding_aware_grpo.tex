@@ -1,0 +1,79 @@
+\paragraph{Reward Design}
+We instantiate grounding-aware GRPO by augmenting the base reward with visual-evidence supervision. Given a model response $y$ and tool calls $T$, the total reward combines semantic correctness, formatting validity, and evidence grounding:
+\begin{equation}
+R = R_{\text{acc}} + R_{\text{format}} + R_{\text{evidence}}.
+\end{equation}
+The accuracy reward $R_{\text{acc}}$ is determined by an external judge and takes values in $\{1, 0.5, 0\}$ (or $0$ if the answer is malformed or overly long):
+\begin{equation}
+R_{\text{acc}} \in \{1, 0.5, 0\}.
+\end{equation}
+The format reward is a binary indicator
+\begin{equation}
+R_{\text{format}} \in \{0, 1\},
+\end{equation}
+which verifies that the response follows the required structured output. The evidence reward $R_{\text{evidence}}$ aggregates interval-level and frame-level visual alignment from the last tool calls:
+\begin{equation}
+R_{\text{evidence}} = R_{\text{crop}} + R_{\text{frame}}.
+\end{equation}
+If a \texttt{crop\_video} call is present, we compute IoU between the predicted segment $[p_s, p_e]$ and the evidence-bearing segment $[g_s, g_e]$ and apply a refinement schedule to encourage higher overlap:
+\begin{equation}
+\text{IoU} = \frac{|[p_s, p_e] \cap [g_s, g_e]|}{|[p_s, p_e] \cup [g_s, g_e]|},
+\end{equation}
+\begin{equation}
+R_{\text{crop}} = \begin{cases}
+\alpha \cdot \text{sign}(\text{IoU}-h_0) + \eta \left\lfloor \frac{\text{IoU}-h_0}{\Delta} \right\rfloor, & \text{IoU} > 0 \\
+0, & \text{IoU} = 0,
+\end{cases}
+\end{equation}
+where $h_0$, $\Delta$, $\eta$, and $\alpha$ are configurable hyperparameters. If only a ground-truth frame $g_f$ is provided, then $R_{\text{crop}}=\mathds{1}[p_s \le g_f \le p_e]$.
+For \texttt{get\_frame}, we reward evidence inclusion or proximity to a ground-truth frame with a linear window $w$:
+\begin{equation}
+R_{\text{frame}} = \begin{cases}
+\mathds{1}[g_s \le t \le g_e], & \text{segment GT} \\
+\max\left(0, 1 - \frac{|t-g_f|}{w}\right), & \text{frame GT},
+\end{cases}
+\end{equation}
+where $t$ is the last sampled timestamp. This design allows the reward to support mixed tool usage while maintaining a unified visual-evidence signal.
+
+\paragraph{GA-GRPO}
+We follow the official GRPO objective but remove the KL divergence term, directly maximizing evidence-grounded returns. Let $G$ be a group of sampled responses $\{\tau_k\}_{k=1}^G$ drawn from $\pi_{\theta_{\text{old}}}(\cdot \mid q)$. The objective is
+\begin{equation}
+\mathcal{J}_{\text{GRPO}}(\theta) = \mathbb{E}_{q \sim P(Q),\, \{\tau_k\}_{k=1}^G \sim \pi_{\theta_{\text{old}}}(\cdot \mid q)}\left[\frac{1}{G}\sum_{k=1}^{G}\frac{\pi_{\theta}(\tau_k \mid q)}{\pi_{\theta_{\text{old}}}(\tau_k \mid q)}A_k\right],
+\end{equation}
+where the advantage is computed as a group mean without variance normalization:
+\begin{equation}
+A_i = R_i - \frac{1}{|G|}\sum_{j \in G} R_j.
+\end{equation}
+At the group level, the mean-centering over $\{\tau_k\}_{k=1}^G$ stabilizes updates across samples generated for the same query. At the trajectory level, the ratio term $\frac{\pi_{\theta}(\tau_k \mid q)}{\pi_{\theta_{\text{old}}}(\tau_k \mid q)}$ scales each trajectory update while preserving the evidence reward signal without variance normalization.
+
+\begin{algorithm}[htbp]
+\caption{Evidence-based Tool Reward with Crop+Frame}
+\label{alg:iou_reward}
+\begin{algorithmic}[1]
+\Require Prediction $y$, ground truth $(g_s,g_e)$ or $g_f$, tool calls $T$
+\Ensure Reward $R = R_{\text{acc}} + R_{\text{format}} + R_{\text{evidence}}$
+\State $R_{\text{acc}} \leftarrow \text{Judge}(y)$
+\State $R_{\text{format}} \leftarrow 1$ if $\text{FormatOK}(y)$ else $0$
+\State $R_{\text{evidence}} \leftarrow 0$
+\If{$\exists$ crop\_video in $T$}
+    \State $(p_s,p_e) \leftarrow \text{LastCrop}(T)$
+    \If{GT is segment}
+        \State $\text{IoU} \leftarrow \frac{|[p_s,p_e]\cap[g_s,g_e]|}{|[p_s,p_e]\cup[g_s,g_e]|}$
+        \State $R_{\text{crop}} \leftarrow \text{Refine}(\text{IoU})$
+    \Else
+        \State $R_{\text{crop}} \leftarrow \mathds{1}[p_s \le g_f \le p_e]$
+    \EndIf
+    \State $R_{\text{evidence}} \leftarrow R_{\text{evidence}} + R_{\text{crop}}$
+\EndIf
+\If{$\exists$ get\_frame in $T$}
+    \State $t \leftarrow \text{LastFrame}(T)$
+    \If{GT is segment}
+        \State $R_{\text{frame}} \leftarrow \mathds{1}[g_s \le t \le g_e]$
+    \Else
+        \State $R_{\text{frame}} \leftarrow \max(0, 1-\frac{|t-g_f|}{w})$
+    \EndIf
+    \State $R_{\text{evidence}} \leftarrow R_{\text{evidence}} + R_{\text{frame}}$
+\EndIf
+\State \Return $R_{\text{acc}} + R_{\text{format}} + R_{\text{evidence}}$
+\end{algorithmic}
+\end{algorithm}
