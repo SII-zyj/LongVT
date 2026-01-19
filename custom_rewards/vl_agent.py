@@ -355,95 +355,84 @@ def compute_score(predict_str: str, ground_truth: str, extra_info=None, **kwargs
                 continue
         return None
 
-    if use_time_reward:
-        count_vision_response_1 = predict_str.count("<tool_response>")
-        if count_vision_response_1 > 0:
-            ground_truth_time = extra_info["video_segment"]
+    def _get_ground_truth_segment(extra_info: dict) -> tuple[float, float] | None:
+        if "video_segment" in extra_info:
+            segment = extra_info["video_segment"]
+            if isinstance(segment, list) and len(segment) == 2:
+                return float(segment[0]), float(segment[1])
+        return None
 
-            # extract the time from the tool_response
-            time_reward = 0.0
-            try:
-                arguments = _extract_last_tool_call("crop_video")
-                last_crop_video = None
-                if arguments and "start_time" in arguments and "end_time" in arguments:
-                    last_crop_video = (float(arguments["start_time"]), float(arguments["end_time"]))
+    def _get_ground_truth_frame(extra_info: dict) -> float | None:
+        for key in ("frame_time", "frame_timestamp", "gt_frame_time"):
+            if key in extra_info:
+                return float(extra_info[key])
+        return None
 
-                # calculate time reward using the last crop_video
-                if last_crop_video:
-                    pred_start, pred_end = last_crop_video
-
-                    # get the ground truth time interval
-                    if isinstance(ground_truth_time, list) and len(ground_truth_time) == 2:
-                        gt_start, gt_end = float(ground_truth_time[0]), float(ground_truth_time[1])
-
-                        # use recall to calculate the time reward (the same logic as compute_score_time_r1)
-                        intersection_start = max(pred_start, gt_start)
-                        intersection_end = min(pred_end, gt_end)
-                        intersection = max(0, intersection_end - intersection_start)
-
-                        gt_length = gt_end - gt_start
-                        if gt_length > 0:
-                            time_reward = intersection / gt_length
-                        else:
-                            time_reward = 1.0 if intersection > 0 else 0.0
-            except Exception:
-                time_reward = 0.0
+    def _iou_reward_from_crop(pred_start: float, pred_end: float, gt_segment, gt_frame) -> float:
+        if gt_segment is None:
+            if gt_frame is None:
+                return 0.0
+            return 1.0 if pred_start <= gt_frame <= pred_end else 0.0
+        gt_start, gt_end = gt_segment
+        intersection_start = max(pred_start, gt_start)
+        intersection_end = min(pred_end, gt_end)
+        intersection = max(0, intersection_end - intersection_start)
+        union_start = min(pred_start, gt_start)
+        union_end = max(pred_end, gt_end)
+        union = union_end - union_start
+        if union > 0:
+            iou = intersection / union
         else:
-            time_reward = 0.0
+            iou = 1.0 if intersection > 0 else 0.0
+        iou_refine_h0 = float(kwargs.get("iou_refine_h0", 0.5))
+        iou_refine_delta = float(kwargs.get("iou_refine_delta", 0.05))
+        iou_refine_eta = float(kwargs.get("iou_refine_eta", 0.1))
+        iou_refine_base = float(kwargs.get("iou_refine_base", 1.0))
+        if iou > 0:
+            sign = 1.0 if iou >= iou_refine_h0 else -1.0
+            step_bonus = 0.0
+            if iou >= iou_refine_h0 and iou_refine_delta > 0:
+                step_bonus = iou_refine_eta * int((iou - iou_refine_h0) / iou_refine_delta)
+            return iou_refine_base * sign + step_bonus
+        return 0.0
 
-        return (1.0 * acc_reward + 1.0 * format_reward + 1.0 * time_reward, acc_reward, format_reward, time_reward)
+    def _iou_reward_from_frame(pred_time: float, gt_segment, gt_frame) -> float:
+        if gt_segment is not None:
+            gt_start, gt_end = gt_segment
+            return 1.0 if gt_start <= pred_time <= gt_end else 0.0
+        if gt_frame is not None:
+            frame_window = float(kwargs.get("frame_reward_window", 1.0))
+            if frame_window <= 0:
+                return 0.0
+            return max(0.0, 1.0 - abs(pred_time - gt_frame) / frame_window)
+        return 0.0
+
+    if use_time_reward:
+        return (1.0 * acc_reward + 1.0 * format_reward, acc_reward, format_reward)
 
     if use_iou_reward:
         count_vision_response_1 = predict_str.count("<tool_response>")
         if count_vision_response_1 > 0:
-            ground_truth_time = extra_info["video_segment"]
+            gt_segment = _get_ground_truth_segment(extra_info)
+            gt_frame = _get_ground_truth_frame(extra_info)
 
             # extract the time from the tool_response
             time_reward = 0.0
             try:
+                crop_reward = 0.0
+                frame_reward = 0.0
                 arguments = _extract_last_tool_call("crop_video")
-                last_crop_video = None
                 if arguments and "start_time" in arguments and "end_time" in arguments:
-                    last_crop_video = (float(arguments["start_time"]), float(arguments["end_time"]))
+                    pred_start = float(arguments["start_time"])
+                    pred_end = float(arguments["end_time"])
+                    crop_reward = _iou_reward_from_crop(pred_start, pred_end, gt_segment, gt_frame)
 
-                # calculate time reward using the last crop_video with IoU
-                if last_crop_video:
-                    pred_start, pred_end = last_crop_video
+                arguments = _extract_last_tool_call("get_frame")
+                if arguments and "timestamp" in arguments:
+                    pred_time = float(arguments["timestamp"])
+                    frame_reward = _iou_reward_from_frame(pred_time, gt_segment, gt_frame)
 
-                    # get the ground truth time interval
-                    if isinstance(ground_truth_time, list) and len(ground_truth_time) == 2:
-                        gt_start, gt_end = float(ground_truth_time[0]), float(ground_truth_time[1])
-
-                        # use IoU to calculate the time reward (the same logic as
-                        # compute_score_time_r1 with use_recall=False)
-                        intersection_start = max(pred_start, gt_start)
-                        intersection_end = min(pred_end, gt_end)
-                        intersection = max(0, intersection_end - intersection_start)
-
-                        # compute union
-                        union_start = min(pred_start, gt_start)
-                        union_end = max(pred_end, gt_end)
-                        union = union_end - union_start
-
-                        # compute IoU
-                        if union > 0:
-                            iou = intersection / union
-                        else:
-                            iou = 1.0 if intersection > 0 else 0.0
-
-                        iou_refine_h0 = float(kwargs.get("iou_refine_h0", 0.5))
-                        iou_refine_delta = float(kwargs.get("iou_refine_delta", 0.05))
-                        iou_refine_eta = float(kwargs.get("iou_refine_eta", 0.1))
-                        iou_refine_base = float(kwargs.get("iou_refine_base", 1.0))
-
-                        if iou > 0:
-                            sign = 1.0 if iou >= iou_refine_h0 else -1.0
-                            step_bonus = 0.0
-                            if iou >= iou_refine_h0 and iou_refine_delta > 0:
-                                step_bonus = iou_refine_eta * int((iou - iou_refine_h0) / iou_refine_delta)
-                            time_reward = iou_refine_base * sign + step_bonus
-                        else:
-                            time_reward = 0.0
+                time_reward = crop_reward + frame_reward
             except Exception:
                 time_reward = 0.0
         else:
